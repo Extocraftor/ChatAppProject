@@ -74,6 +74,23 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<bool> createChannel(String name, String? description) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/channels/"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"name": name, "description": description}),
+      );
+      if (response.statusCode == 200) {
+        await fetchChannels(); // Refresh list
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   Future<void> fetchChannels() async {
     final response = await http.get(Uri.parse("$baseUrl/channels/"));
     if (response.statusCode == 200) {

@@ -5,6 +5,41 @@ import '../providers/app_state.dart';
 class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
 
+  void _showCreateChannelDialog(BuildContext context, AppState state) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF2F3136),
+        title: const Text("Create Channel"),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            labelText: "Channel Name",
+            hintText: "e.g. general",
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              if (controller.text.isNotEmpty) {
+                final success = await state.createChannel(controller.text, null);
+                if (success) {
+                  Navigator.pop(context);
+                }
+              }
+            },
+            child: const Text("Create"),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -20,8 +55,19 @@ class Sidebar extends StatelessWidget {
             decoration: const BoxDecoration(
               border: Border(bottom: BorderSide(color: Color(0xFF202225))),
             ),
-            alignment: Alignment.centerLeft,
-            child: const Text("Channels", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("Channels", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                IconButton(
+                  icon: const Icon(Icons.add, size: 20, color: Colors.grey),
+                  onPressed: () => _showCreateChannelDialog(context, state),
+                  tooltip: "Create Channel",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ],
+            ),
           ),
           Expanded(
             child: ListView.builder(
