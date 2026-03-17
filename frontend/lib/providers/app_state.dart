@@ -28,16 +28,25 @@ class AppState extends ChangeNotifier {
 
   Future<String?> register(String username, String password) async {
     try {
+      print("Attempting to register at: $baseUrl/users/");
       final response = await http.post(
         Uri.parse("$baseUrl/users/"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"username": username, "password": password}),
       );
+
+      print("Server Response Status: ${response.statusCode}");
+      print("Server Response Body: ${response.body}");
+
       if (response.statusCode == 200) {
         return null; // Success
       } else {
-        final data = jsonDecode(response.body);
-        return data['detail'] ?? "Registration failed";
+        try {
+          final data = jsonDecode(response.body);
+          return data['detail'] ?? "Registration failed";
+        } catch (e) {
+          return "Server error (Non-JSON): ${response.body}";
+        }
       }
     } catch (e) {
       return "Connection error: $e";

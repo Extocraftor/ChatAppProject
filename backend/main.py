@@ -12,11 +12,11 @@ from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def get_password_hash(password):
-    # Bcrypt has a 72-byte limit. We truncate to prevent ValueErrors.
-    return pwd_context.hash(password[:72])
+    # Bcrypt has a 72-byte limit. We truncate to 64 for extra safety.
+    return pwd_context.hash(password[:64])
 
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password[:72], hashed_password)
+    return pwd_context.verify(plain_password[:64], hashed_password)
 
 # Create all tables on startup
 models.Base.metadata.create_all(bind=engine)
