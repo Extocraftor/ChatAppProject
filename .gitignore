@@ -1,9 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
+# Secret Files (VERY IMPORTANT)
 .env
+.env.*
+.venv/
 
 # Flutter
 frontend/.dart_tool/
