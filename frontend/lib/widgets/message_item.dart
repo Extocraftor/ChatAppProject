@@ -40,6 +40,31 @@ class _MessageItemState extends State<MessageItem> {
     }
   }
 
+  void _showDeleteDialog(BuildContext context, AppState state) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF2F3136),
+        title: const Text("Delete Message"),
+        content: const Text("Are you sure you want to delete this message? This cannot be undone."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              state.deleteMessage(widget.message.id);
+              Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -137,13 +162,20 @@ class _MessageItemState extends State<MessageItem> {
                         tooltip: "Reply",
                         constraints: const BoxConstraints(),
                       ),
-                      if (isOwnMessage)
+                      if (isOwnMessage) ...[
                         IconButton(
                           icon: const Icon(Icons.edit, size: 18, color: Colors.grey),
                           onPressed: () => state.setEditingMessage(widget.message),
                           tooltip: "Edit",
                           constraints: const BoxConstraints(),
                         ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, size: 18, color: Colors.redAccent),
+                          onPressed: () => _showDeleteDialog(context, state),
+                          tooltip: "Delete",
+                          constraints: const BoxConstraints(),
+                        ),
+                      ],
                     ],
                   ),
                 ),

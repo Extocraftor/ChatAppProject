@@ -10,7 +10,47 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final TextEditingController _controller = TextEditingController();
+  final TextEditingController _userController = TextEditingController();
+  final TextEditingController _passController = TextEditingController();
+  bool _isRegistering = false;
+  bool _isLoading = false;
+
+  void _submit() async {
+    final username = _userController.text.trim();
+    final password = _passController.text.trim();
+
+    if (username.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Please enter both username and password")),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    final state = context.read<AppState>();
+
+    if (_isRegistering) {
+      final success = await state.register(username, password);
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Registration successful! Please log in.")),
+        );
+        setState(() => _isRegistering = false);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Registration failed. Username might be taken.")),
+        );
+      }
+    } else {
+      final error = await state.login(username, password);
+      if (error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error)),
+        );
+      }
+    }
+    setState(() => _isLoading = false);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -26,14 +66,31 @@ class _LoginScreenState extends State<LoginScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text("Welcome back!", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+              Text(
+                _isRegistering ? "Create an account" : "Welcome back!",
+                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 8),
-              const Text("Enter your username to start chatting", style: TextStyle(color: Colors.grey)),
+              Text(
+                _isRegistering ? "Join the conversation" : "We're so excited to see you again!",
+                style: const TextStyle(color: Colors.grey),
+              ),
               const SizedBox(height: 24),
               TextField(
-                controller: _controller,
+                controller: _userController,
                 decoration: const InputDecoration(
                   labelText: "USERNAME",
+                  filled: true,
+                  fillColor: Color(0xFF202225),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 20),
+              TextField(
+                controller: _passController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: "PASSWORD",
                   filled: true,
                   fillColor: Color(0xFF202225),
                   border: OutlineInputBorder(),
@@ -44,8 +101,18 @@ class _LoginScreenState extends State<LoginScreen> {
                 width: double.infinity,
                 height: 45,
                 child: ElevatedButton(
-                  onPressed: () => context.read<AppState>().login(_controller.text),
-                  child: const Text("Log In"),
+                  onPressed: _isLoading ? null : _submit,
+                  child: _isLoading
+                      ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text(_isRegistering ? "Register" : "Log In"),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextButton(
+                onPressed: () => setState(() => _isRegistering = !_isRegistering),
+                child: Text(
+                  _isRegistering ? "Already have an account?" : "Need an account? Register",
+                  style: const TextStyle(color: Color(0xFF00AFF4)),
                 ),
               ),
             ],

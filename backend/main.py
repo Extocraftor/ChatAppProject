@@ -6,6 +6,17 @@ import json
 
 from database import engine, Base, get_db
 import models, schemas
+from passlib.context import CryptContext
+
+# Password hashing configuration
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def get_password_hash(password):
+    # Bcrypt has a 72-byte limit. We truncate to prevent ValueErrors.
+    return pwd_context.hash(password[:72])
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password[:72], hashed_password)
 
 # Create all tables on startup
 models.Base.metadata.create_all(bind=engine)
@@ -47,13 +58,19 @@ manager = ConnectionManager()
 
 @app.post("/users/", response_model=schemas.UserSchema)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    db_user = models.User(username=user.username, hashed_password=user.password) # In prod, hash this!
+    # Check if username exists
+    existing_user = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    hashed_pwd = get_password_hash(user.password)
+    db_user = models.User(username=user.username, hashed_password=hashed_pwd)
     db.add(db_user)
     try:
         db.commit()
     except Exception:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Username already registered")
+        raise HTTPException(status_code=400, detail="Error creating user")
     db.refresh(db_user)
     return db_user
 
@@ -64,7 +81,7 @@ def list_users(db: Session = Depends(get_db)):
 @app.post("/login/", response_model=schemas.UserSchema)
 def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
-    if not db_user or db_user.hashed_password != user.password:
+    if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     return db_user
 
@@ -133,7 +150,24 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, user_id: int
                             "content": content
                         })
                     else:
-                        continue # Or send error back
+                        continue
+                
+                elif msg_type == "delete_message":
+                    msg_id = data_json.get("id")
+                    db_message = db.query(models.Message).filter(models.Message.id == msg_id, models.Message.user_id == user_id).first()
+                    if db_message:
+                        # Before deleting, null out parent_id of any replies to prevent FK errors or delete them too
+                        # For simplicity, we'll just delete the message. 
+                        # SQLAlchemy handles FKs based on how you set up the model.
+                        db.delete(db_message)
+                        db.commit()
+                        
+                        broadcast_msg = json.dumps({
+                            "type": "delete_message",
+                            "id": msg_id
+                        })
+                    else:
+                        continue
                 
                 await manager.broadcast(broadcast_msg, channel_id)
                 

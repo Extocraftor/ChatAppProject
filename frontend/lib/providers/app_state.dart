@@ -24,16 +24,33 @@ class AppState extends ChangeNotifier {
   // Scrolling
   final ScrollController scrollController = ScrollController();
 
-  Future<void> login(String username) async {
+  Future<bool> register(String username, String password) async {
     final response = await http.post(
-      Uri.parse("$baseUrl/login/"),
+      Uri.parse("$baseUrl/users/"),
       headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"username": username, "password": "password"}),
+      body: jsonEncode({"username": username, "password": password}),
     );
-    if (response.statusCode == 200) {
-      currentUser = User.fromJson(jsonDecode(response.body));
-      await fetchChannels();
-      notifyListeners();
+    return response.statusCode == 200;
+  }
+
+  Future<String?> login(String username, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/login/"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"username": username, "password": password}),
+      );
+      if (response.statusCode == 200) {
+        currentUser = User.fromJson(jsonDecode(response.body));
+        await fetchChannels();
+        notifyListeners();
+        return null; // Success
+      } else {
+        final data = jsonDecode(response.body);
+        return data['detail'] ?? "Login failed";
+      }
+    } catch (e) {
+      return "Connection error";
     }
   }
 
@@ -87,6 +104,9 @@ class AppState extends ChangeNotifier {
         if (index != -1) {
           messages[index] = messages[index].copyWith(content: content);
         }
+      } else if (type == 'delete_message') {
+        final id = json['id'];
+        messages.removeWhere((m) => m.id == id);
       }
       notifyListeners();
     });
@@ -110,7 +130,6 @@ class AppState extends ChangeNotifier {
     highlightedMessageId = id;
     notifyListeners();
     
-    // Scroll to the message
     scrollToMessage(id);
 
     _highlightTimer?.cancel();
@@ -123,13 +142,7 @@ class AppState extends ChangeNotifier {
   void scrollToMessage(int id) {
     final index = messages.indexWhere((m) => m.id == id);
     if (index != -1 && scrollController.hasClients) {
-      // Estimate position since we don't have item heights
-      // In a real app with variable heights, we'd use a package like scrollable_positioned_list
-      // For now, let's try to jump to the approximate area or use a simple jump.
-      // A better way without a package is to use a GlobalKey per message, which is heavy.
-      // Let's assume a rough height for now or just use an index-based jump if possible.
-      // Since ListView doesn't support index-based scrolling natively, we'll use a simple approximation.
-      final position = index * 60.0; // Assume 60px average height
+      final position = index * 60.0;
       scrollController.animateTo(
         position,
         duration: const Duration(milliseconds: 500),
@@ -171,6 +184,16 @@ class AppState extends ChangeNotifier {
       replyingTo = null;
     }
     notifyListeners();
+  }
+
+  void deleteMessage(int messageId) {
+    if (_channel != null) {
+      final messageData = {
+        "type": "delete_message",
+        "id": messageId,
+      };
+      _channel!.sink.add(jsonEncode(messageData));
+    }
   }
 
   @override
