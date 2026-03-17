@@ -8,7 +8,7 @@ import '../models/chat_models.dart';
 class AppState extends ChangeNotifier {
   // static const String baseUrl = "http://127.0.0.1:8000";
   // static const String wsUrl = "ws://127.0.0.1:8000/ws";
-  static const String baseUrl = "https://extochatapp.onrender.com/";
+  static const String baseUrl = "https://extochatapp.onrender.com";
   static const String wsUrl = "wss://extochatapp.onrender.com/ws";
 
   User? currentUser;
