@@ -30,15 +30,15 @@ class _LoginScreenState extends State<LoginScreen> {
     final state = context.read<AppState>();
 
     if (_isRegistering) {
-      final success = await state.register(username, password);
-      if (success) {
+      final error = await state.register(username, password);
+      if (error == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Registration successful! Please log in.")),
         );
         setState(() => _isRegistering = false);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Registration failed. Username might be taken.")),
+          SnackBar(content: Text(error)),
         );
       }
     } else {

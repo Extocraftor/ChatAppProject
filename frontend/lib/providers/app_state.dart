@@ -26,13 +26,22 @@ class AppState extends ChangeNotifier {
   // Scrolling
   final ScrollController scrollController = ScrollController();
 
-  Future<bool> register(String username, String password) async {
-    final response = await http.post(
-      Uri.parse("$baseUrl/users/"),
-      headers: {"Content-Type": "application/json"},
-      body: jsonEncode({"username": username, "password": password}),
-    );
-    return response.statusCode == 200;
+  Future<String?> register(String username, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/users/"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"username": username, "password": password}),
+      );
+      if (response.statusCode == 200) {
+        return null; // Success
+      } else {
+        final data = jsonDecode(response.body);
+        return data['detail'] ?? "Registration failed";
+      }
+    } catch (e) {
+      return "Connection error: $e";
+    }
   }
 
   Future<String?> login(String username, String password) async {

@@ -31,7 +31,9 @@ class DiscordCloneApp extends StatelessWidget {
       ),
       home: Consumer<AppState>(
         builder: (context, state, child) {
-          return state.currentUser == null ? const LoginScreen() : const MainLayout();
+          return state.currentUser == null
+              ? const LoginScreen()
+              : const MainLayout();
         },
       ),
     );
