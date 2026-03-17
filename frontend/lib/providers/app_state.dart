@@ -6,15 +6,17 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/chat_models.dart';
 
 class AppState extends ChangeNotifier {
-  static const String baseUrl = "http://127.0.0.1:8000";
-  static const String wsUrl = "ws://127.0.0.1:8000/ws";
+  // static const String baseUrl = "http://127.0.0.1:8000";
+  // static const String wsUrl = "ws://127.0.0.1:8000/ws";
+  static const String baseUrl = "https://your-app-name.onrender.com";
+  static const String wsUrl = "wss://your-app-name.onrender.com/ws";
 
   User? currentUser;
   List<Channel> channels = [];
   Channel? activeChannel;
   WebSocketChannel? _channel;
   List<Message> messages = [];
-  
+
   // Interaction state
   Message? replyingTo;
   Message? editingMessage;
@@ -67,7 +69,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> fetchMessages(int channelId) async {
-    final response = await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
+    final response =
+        await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       messages = data.map((m) => Message.fromJson(m)).toList();
@@ -82,7 +85,7 @@ class AppState extends ChangeNotifier {
     replyingTo = null;
     editingMessage = null;
     _channel?.sink.close();
-    
+
     fetchMessages(channel.id);
 
     _channel = WebSocketChannel.connect(
@@ -129,7 +132,7 @@ class AppState extends ChangeNotifier {
   void highlightMessage(int id) {
     highlightedMessageId = id;
     notifyListeners();
-    
+
     scrollToMessage(id);
 
     _highlightTimer?.cancel();
