@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/chat_models.dart';
+import '../utils/ws_channel_factory.dart';
 
 class AppState extends ChangeNotifier {
   // static const String baseUrl = "http://127.0.0.1:8000";
@@ -31,6 +32,7 @@ class AppState extends ChangeNotifier {
   VoiceChannel? activeVoiceChannel;
   final Map<int, VoiceParticipant> voiceParticipants = {};
   WebSocketChannel? _voiceSignalChannel;
+  Timer? _voicePingTimer;
   MediaStream? _localStream;
   final Map<int, RTCPeerConnection> _peerConnections = {};
   final Map<int, MediaStream> _remoteStreams = {};
@@ -184,7 +186,7 @@ class AppState extends ChangeNotifier {
 
     fetchMessages(channel.id);
 
-    _channel = WebSocketChannel.connect(
+    _channel = createWsChannel(
       Uri.parse("$wsUrl/${channel.id}/${currentUser!.id}"),
     );
 
@@ -237,11 +239,12 @@ class AppState extends ChangeNotifier {
 
       failedStep = 'signal connection';
       activeVoiceChannel = channel;
-      final signalChannel = WebSocketChannel.connect(
+      final signalChannel = createWsChannel(
         Uri.parse("$wsUrl/voice/${channel.id}/${currentUser!.id}"),
       );
       await signalChannel.ready;
       _voiceSignalChannel = signalChannel;
+      _startVoicePing();
 
       _voiceSignalChannel!.stream.listen(
         (data) {
@@ -583,6 +586,9 @@ class AppState extends ChangeNotifier {
     required bool notify,
     required bool clearError,
   }) async {
+    _voicePingTimer?.cancel();
+    _voicePingTimer = null;
+
     if (clearError) {
       voiceError = null;
     }
@@ -677,6 +683,19 @@ class AppState extends ChangeNotifier {
         errorText.contains('not found');
   }
 
+  void _startVoicePing() {
+    _voicePingTimer?.cancel();
+    _voicePingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_voiceSignalChannel == null) {
+        _voicePingTimer?.cancel();
+        _voicePingTimer = null;
+        return;
+      }
+
+      _sendVoiceSignal({'type': 'ping'});
+    });
+  }
+
   void setReplyingTo(Message? message) {
     replyingTo = message;
     editingMessage = null;
@@ -766,6 +785,8 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _channel?.sink.close();
     _voiceSignalChannel?.sink.close();
+    _voicePingTimer?.cancel();
+    _voicePingTimer = null;
 
     for (final peerConnection in _peerConnections.values) {
       peerConnection.onIceCandidate = null;

@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from typing import Any, Dict, List
 import json
+import os
 
 from database import engine, get_db
 import models, schemas
@@ -461,4 +462,13 @@ async def voice_websocket_endpoint(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    ws_ping_interval = float(os.getenv("WS_PING_INTERVAL", "30"))
+    ws_ping_timeout = float(os.getenv("WS_PING_TIMEOUT", "120"))
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        ws_ping_interval=ws_ping_interval,
+        ws_ping_timeout=ws_ping_timeout,
+    )
