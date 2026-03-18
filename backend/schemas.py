@@ -37,6 +37,29 @@ class ChannelSchema(ChannelBase):
     class Config:
         from_attributes = True
 
+
+class VoiceChannelBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class VoiceChannelCreate(VoiceChannelBase):
+    pass
+
+
+class VoiceChannelSchema(VoiceChannelBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+class VoiceParticipantSchema(BaseModel):
+    user_id: int
+    username: str
+    is_muted: bool = False
+
+
 class UserBase(BaseModel):
     username: str
 

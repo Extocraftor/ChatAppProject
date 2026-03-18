@@ -17,6 +17,14 @@ class Channel(Base):
     description = Column(String)
     messages = relationship("Message", back_populates="channel")
 
+
+class VoiceChannel(Base):
+    __tablename__ = "voice_channels"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    description = Column(String)
+
+
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, index=True)

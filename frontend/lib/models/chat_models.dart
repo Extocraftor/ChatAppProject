@@ -21,6 +21,53 @@ class Channel {
   }
 }
 
+class VoiceChannel {
+  final int id;
+  final String name;
+  final String? description;
+
+  VoiceChannel({required this.id, required this.name, this.description});
+
+  factory VoiceChannel.fromJson(Map<String, dynamic> json) {
+    return VoiceChannel(
+      id: json['id'],
+      name: json['name'],
+      description: json['description'],
+    );
+  }
+}
+
+class VoiceParticipant {
+  final int userId;
+  final String username;
+  final bool isMuted;
+
+  VoiceParticipant({
+    required this.userId,
+    required this.username,
+    required this.isMuted,
+  });
+
+  VoiceParticipant copyWith({
+    String? username,
+    bool? isMuted,
+  }) {
+    return VoiceParticipant(
+      userId: userId,
+      username: username ?? this.username,
+      isMuted: isMuted ?? this.isMuted,
+    );
+  }
+
+  factory VoiceParticipant.fromJson(Map<String, dynamic> json) {
+    return VoiceParticipant(
+      userId: json['user_id'],
+      username: json['username'] ?? "User #${json['user_id']}",
+      isMuted: json['is_muted'] ?? false,
+    );
+  }
+}
+
 class Message {
   final int id;
   final int userId;

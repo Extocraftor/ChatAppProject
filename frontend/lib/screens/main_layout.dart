@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../providers/app_state.dart';
-import '../widgets/sidebar.dart';
-import '../widgets/message_item.dart';
 import '../widgets/message_input.dart';
+import '../widgets/message_item.dart';
+import '../widgets/sidebar.dart';
 
 class MainLayout extends StatelessWidget {
   const MainLayout({super.key});
@@ -15,13 +16,10 @@ class MainLayout extends StatelessWidget {
     return Scaffold(
       body: Row(
         children: [
-          // Sidebar: Channel List
           const Sidebar(),
-          // Main Chat Area
           Expanded(
             child: Column(
               children: [
-                // Chat Header
                 Container(
                   height: 50,
                   padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -30,9 +28,42 @@ class MainLayout extends StatelessWidget {
                     boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
                   ),
                   alignment: Alignment.centerLeft,
-                  child: Text("# ${state.activeChannel?.name ?? ''}", style: const TextStyle(fontWeight: FontWeight.bold)),
+                  child: Text(
+                    "# ${state.activeChannel?.name ?? ''}",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
-                // Messages List
+                if (state.activeVoiceChannel != null)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    color: const Color(0xFF2F3136),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: state.voiceParticipants.values.map((participant) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF40444B),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                participant.isMuted ? Icons.mic_off : Icons.mic,
+                                size: 14,
+                                color: participant.isMuted ? Colors.redAccent : Colors.greenAccent,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(participant.username),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
                 Expanded(
                   child: ListView.builder(
                     controller: state.scrollController,
@@ -43,7 +74,6 @@ class MainLayout extends StatelessWidget {
                     },
                   ),
                 ),
-                // Input Bar
                 const MessageInput(),
               ],
             ),

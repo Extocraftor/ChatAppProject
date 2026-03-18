@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+
 import '../models/chat_models.dart';
 
 class AppState extends ChangeNotifier {
@@ -11,11 +14,28 @@ class AppState extends ChangeNotifier {
   static const String baseUrl = "https://extochatapp.onrender.com";
   static const String wsUrl = "wss://extochatapp.onrender.com/ws";
 
+  static const Map<String, dynamic> _rtcConfiguration = {
+    'iceServers': [
+      {'urls': 'stun:stun.l.google.com:19302'},
+    ],
+  };
+
   User? currentUser;
   List<Channel> channels = [];
   Channel? activeChannel;
   WebSocketChannel? _channel;
   List<Message> messages = [];
+
+  List<VoiceChannel> voiceChannels = [];
+  VoiceChannel? activeVoiceChannel;
+  final Map<int, VoiceParticipant> voiceParticipants = {};
+  WebSocketChannel? _voiceSignalChannel;
+  MediaStream? _localStream;
+  final Map<int, RTCPeerConnection> _peerConnections = {};
+  final Map<int, MediaStream> _remoteStreams = {};
+  bool isSelfMuted = false;
+  bool _voiceConnecting = false;
+  String? voiceError;
 
   // Interaction state
   Message? replyingTo;
@@ -26,27 +46,25 @@ class AppState extends ChangeNotifier {
   // Scrolling
   final ScrollController scrollController = ScrollController();
 
+  bool get isVoiceConnecting => _voiceConnecting;
+
   Future<String?> register(String username, String password) async {
     try {
-      print("Attempting to register at: $baseUrl/users/");
       final response = await http.post(
         Uri.parse("$baseUrl/users/"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"username": username, "password": password}),
       );
 
-      print("Server Response Status: ${response.statusCode}");
-      print("Server Response Body: ${response.body}");
-
       if (response.statusCode == 200) {
-        return null; // Success
-      } else {
-        try {
-          final data = jsonDecode(response.body);
-          return data['detail'] ?? "Registration failed";
-        } catch (e) {
-          return "Server error (Non-JSON): ${response.body}";
-        }
+        return null;
+      }
+
+      try {
+        final data = jsonDecode(response.body);
+        return data['detail'] ?? "Registration failed";
+      } catch (_) {
+        return "Server error (Non-JSON): ${response.body}";
       }
     } catch (e) {
       return "Connection error: $e";
@@ -60,16 +78,18 @@ class AppState extends ChangeNotifier {
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"username": username, "password": password}),
       );
+
       if (response.statusCode == 200) {
         currentUser = User.fromJson(jsonDecode(response.body));
         await fetchChannels();
+        await fetchVoiceChannels();
         notifyListeners();
-        return null; // Success
-      } else {
-        final data = jsonDecode(response.body);
-        return data['detail'] ?? "Login failed";
+        return null;
       }
-    } catch (e) {
+
+      final data = jsonDecode(response.body);
+      return data['detail'] ?? "Login failed";
+    } catch (_) {
       return "Connection error";
     }
   }
@@ -81,12 +101,33 @@ class AppState extends ChangeNotifier {
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"name": name, "description": description}),
       );
+
       if (response.statusCode == 200) {
-        await fetchChannels(); // Refresh list
+        await fetchChannels();
         return true;
       }
+
       return false;
-    } catch (e) {
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> createVoiceChannel(String name, String? description) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/voice-channels/"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"name": name, "description": description}),
+      );
+
+      if (response.statusCode == 200) {
+        await fetchVoiceChannels();
+        return true;
+      }
+
+      return false;
+    } catch (_) {
       return false;
     }
   }
@@ -103,9 +144,25 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> fetchVoiceChannels() async {
+    final response = await http.get(Uri.parse("$baseUrl/voice-channels/"));
+    if (response.statusCode == 200) {
+      final List data = jsonDecode(response.body);
+      voiceChannels = data.map((c) => VoiceChannel.fromJson(c)).toList();
+
+      if (activeVoiceChannel != null) {
+        final stillExists = voiceChannels.any((c) => c.id == activeVoiceChannel!.id);
+        if (!stillExists) {
+          await leaveVoiceChannel();
+        }
+      }
+
+      notifyListeners();
+    }
+  }
+
   Future<void> fetchMessages(int channelId) async {
-    final response =
-        await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
+    final response = await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       messages = data.map((m) => Message.fromJson(m)).toList();
@@ -150,6 +207,400 @@ class AppState extends ChangeNotifier {
     });
 
     notifyListeners();
+  }
+
+  Future<bool> joinVoiceChannel(VoiceChannel channel) async {
+    if (currentUser == null) {
+      return false;
+    }
+
+    if (activeVoiceChannel?.id == channel.id && _voiceSignalChannel != null) {
+      return true;
+    }
+
+    await leaveVoiceChannel(notify: false);
+
+    _voiceConnecting = true;
+    voiceError = null;
+    notifyListeners();
+
+    try {
+      _localStream = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+
+      activeVoiceChannel = channel;
+      _voiceSignalChannel = WebSocketChannel.connect(
+        Uri.parse("$wsUrl/voice/${channel.id}/${currentUser!.id}"),
+      );
+
+      _voiceSignalChannel!.stream.listen(
+        (data) {
+          unawaited(_handleVoiceSignal(data));
+        },
+        onDone: () {
+          _handleVoiceSocketClosed();
+        },
+        onError: (error) {
+          _handleVoiceSocketClosed(error: error);
+        },
+        cancelOnError: true,
+      );
+
+      _voiceConnecting = false;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      voiceError = "Unable to join voice channel: $e";
+      _voiceConnecting = false;
+      await leaveVoiceChannel(notify: false, clearError: false);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  void _handleVoiceSocketClosed({Object? error}) {
+    if (activeVoiceChannel == null) {
+      return;
+    }
+
+    voiceError = error == null
+        ? "Voice channel disconnected"
+        : "Voice connection error: $error";
+
+    unawaited(leaveVoiceChannel(notify: true, clearError: false));
+  }
+
+  Future<void> _handleVoiceSignal(dynamic data) async {
+    try {
+      final Map<String, dynamic> payload = jsonDecode(data);
+      final type = payload['type'];
+
+      if (type == 'voice_state') {
+        final participants = (payload['participants'] as List<dynamic>? ?? [])
+            .whereType<Map<dynamic, dynamic>>()
+            .map((p) => VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
+            .toList();
+
+        voiceParticipants
+          ..clear()
+          ..addEntries(participants.map((p) => MapEntry(p.userId, p)));
+
+        notifyListeners();
+        return;
+      }
+
+      if (type == 'participant_joined') {
+        final participant = VoiceParticipant.fromJson(payload);
+        voiceParticipants[participant.userId] = participant;
+
+        if (participant.userId != currentUser?.id) {
+          await _createOfferForUser(participant.userId);
+        }
+
+        notifyListeners();
+        return;
+      }
+
+      if (type == 'participant_left') {
+        final userId = payload['user_id'];
+        if (userId is int) {
+          voiceParticipants.remove(userId);
+          await _closePeerConnection(userId);
+          notifyListeners();
+        }
+        return;
+      }
+
+      if (type == 'mute_state') {
+        final userId = payload['user_id'];
+        final isMuted = payload['is_muted'] == true;
+        if (userId is int) {
+          final current = voiceParticipants[userId];
+          if (current != null) {
+            voiceParticipants[userId] = current.copyWith(isMuted: isMuted);
+          }
+          notifyListeners();
+        }
+        return;
+      }
+
+      if (type == 'offer') {
+        await _handleOffer(payload);
+        return;
+      }
+
+      if (type == 'answer') {
+        await _handleAnswer(payload);
+        return;
+      }
+
+      if (type == 'ice_candidate') {
+        await _handleRemoteIceCandidate(payload);
+        return;
+      }
+    } catch (_) {
+      // Ignore malformed signaling payloads.
+    }
+  }
+
+  Future<RTCPeerConnection> _ensurePeerConnection(int remoteUserId) async {
+    final existing = _peerConnections[remoteUserId];
+    if (existing != null) {
+      return existing;
+    }
+
+    final peerConnection = await createPeerConnection(_rtcConfiguration);
+    _peerConnections[remoteUserId] = peerConnection;
+
+    if (_localStream != null) {
+      for (final track in _localStream!.getAudioTracks()) {
+        await peerConnection.addTrack(track, _localStream!);
+      }
+    }
+
+    peerConnection.onIceCandidate = (candidate) {
+      final candidateValue = candidate.candidate;
+      if (candidateValue == null || candidateValue.isEmpty) {
+        return;
+      }
+
+      _sendVoiceSignal({
+        'type': 'ice_candidate',
+        'target_user_id': remoteUserId,
+        'candidate': {
+          'candidate': candidateValue,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        },
+      });
+    };
+
+    peerConnection.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        _remoteStreams[remoteUserId] = event.streams.first;
+      }
+    };
+
+    peerConnection.onConnectionState = (state) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        unawaited(_closePeerConnection(remoteUserId));
+        notifyListeners();
+      }
+    };
+
+    return peerConnection;
+  }
+
+  Future<void> _createOfferForUser(int remoteUserId) async {
+    if (currentUser == null || remoteUserId == currentUser!.id) {
+      return;
+    }
+
+    final peerConnection = await _ensurePeerConnection(remoteUserId);
+
+    final offer = await peerConnection.createOffer({
+      'offerToReceiveAudio': true,
+      'offerToReceiveVideo': false,
+    });
+
+    await peerConnection.setLocalDescription(offer);
+
+    _sendVoiceSignal({
+      'type': 'offer',
+      'target_user_id': remoteUserId,
+      'sdp': {
+        'sdp': offer.sdp,
+        'type': offer.type,
+      },
+    });
+  }
+
+  Future<void> _handleOffer(Map<String, dynamic> payload) async {
+    final fromUserId = payload['from_user_id'];
+    final sdpData = payload['sdp'];
+
+    if (fromUserId is! int || sdpData is! Map<dynamic, dynamic>) {
+      return;
+    }
+    final normalizedSdp = Map<String, dynamic>.from(sdpData);
+
+    final remoteSdp = normalizedSdp['sdp'];
+    final remoteType = normalizedSdp['type'];
+    if (remoteSdp is! String || remoteType is! String) {
+      return;
+    }
+
+    final peerConnection = await _ensurePeerConnection(fromUserId);
+    await peerConnection.setRemoteDescription(
+      RTCSessionDescription(remoteSdp, remoteType),
+    );
+
+    final answer = await peerConnection.createAnswer({
+      'offerToReceiveAudio': true,
+      'offerToReceiveVideo': false,
+    });
+
+    await peerConnection.setLocalDescription(answer);
+
+    _sendVoiceSignal({
+      'type': 'answer',
+      'target_user_id': fromUserId,
+      'sdp': {
+        'sdp': answer.sdp,
+        'type': answer.type,
+      },
+    });
+  }
+
+  Future<void> _handleAnswer(Map<String, dynamic> payload) async {
+    final fromUserId = payload['from_user_id'];
+    final sdpData = payload['sdp'];
+
+    if (fromUserId is! int || sdpData is! Map<dynamic, dynamic>) {
+      return;
+    }
+    final normalizedSdp = Map<String, dynamic>.from(sdpData);
+
+    final peerConnection = _peerConnections[fromUserId];
+    if (peerConnection == null) {
+      return;
+    }
+
+    final remoteSdp = normalizedSdp['sdp'];
+    final remoteType = normalizedSdp['type'];
+    if (remoteSdp is! String || remoteType is! String) {
+      return;
+    }
+
+    await peerConnection.setRemoteDescription(
+      RTCSessionDescription(remoteSdp, remoteType),
+    );
+  }
+
+  Future<void> _handleRemoteIceCandidate(Map<String, dynamic> payload) async {
+    final fromUserId = payload['from_user_id'];
+    final candidateData = payload['candidate'];
+
+    if (fromUserId is! int || candidateData is! Map<dynamic, dynamic>) {
+      return;
+    }
+    final normalizedCandidate = Map<String, dynamic>.from(candidateData);
+
+    final candidate = normalizedCandidate['candidate'];
+    final sdpMid = normalizedCandidate['sdpMid'];
+    final sdpMLineIndex = normalizedCandidate['sdpMLineIndex'];
+
+    if (candidate is! String) {
+      return;
+    }
+
+    final peerConnection = await _ensurePeerConnection(fromUserId);
+    await peerConnection.addCandidate(
+      RTCIceCandidate(
+        candidate,
+        sdpMid is String ? sdpMid : null,
+        sdpMLineIndex is int ? sdpMLineIndex : null,
+      ),
+    );
+  }
+
+  void _sendVoiceSignal(Map<String, dynamic> payload) {
+    final signalChannel = _voiceSignalChannel;
+    if (signalChannel == null) {
+      return;
+    }
+
+    signalChannel.sink.add(jsonEncode(payload));
+  }
+
+  void toggleMute() {
+    final stream = _localStream;
+    if (stream == null || currentUser == null) {
+      return;
+    }
+
+    isSelfMuted = !isSelfMuted;
+
+    for (final track in stream.getAudioTracks()) {
+      track.enabled = !isSelfMuted;
+    }
+
+    final selfParticipant = voiceParticipants[currentUser!.id];
+    if (selfParticipant != null) {
+      voiceParticipants[currentUser!.id] = selfParticipant.copyWith(isMuted: isSelfMuted);
+    }
+
+    _sendVoiceSignal({
+      'type': 'mute_state',
+      'is_muted': isSelfMuted,
+    });
+
+    notifyListeners();
+  }
+
+  Future<void> leaveVoiceChannel({bool notify = true, bool clearError = true}) async {
+    if (clearError) {
+      voiceError = null;
+    }
+
+    final signalChannel = _voiceSignalChannel;
+    _voiceSignalChannel = null;
+
+    _voiceConnecting = false;
+    activeVoiceChannel = null;
+    isSelfMuted = false;
+
+    if (signalChannel != null) {
+      signalChannel.sink.close();
+    }
+
+    for (final userId in _peerConnections.keys.toList()) {
+      await _closePeerConnection(userId);
+    }
+
+    _peerConnections.clear();
+
+    for (final stream in _remoteStreams.values) {
+      for (final track in stream.getTracks()) {
+        track.stop();
+      }
+      await stream.dispose();
+    }
+    _remoteStreams.clear();
+
+    final localStream = _localStream;
+    if (localStream != null) {
+      for (final track in localStream.getTracks()) {
+        track.stop();
+      }
+      await localStream.dispose();
+      _localStream = null;
+    }
+
+    voiceParticipants.clear();
+
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _closePeerConnection(int remoteUserId) async {
+    final peerConnection = _peerConnections.remove(remoteUserId);
+    if (peerConnection != null) {
+      await peerConnection.close();
+    }
+
+    final remoteStream = _remoteStreams.remove(remoteUserId);
+    if (remoteStream != null) {
+      for (final track in remoteStream.getTracks()) {
+        track.stop();
+      }
+      await remoteStream.dispose();
+    }
   }
 
   void setReplyingTo(Message? message) {
@@ -202,7 +653,9 @@ class AppState extends ChangeNotifier {
   }
 
   void sendMessage(String content) {
-    if (content.isEmpty || _channel == null) return;
+    if (content.isEmpty || _channel == null) {
+      return;
+    }
 
     if (editingMessage != null) {
       final messageData = {
@@ -221,6 +674,7 @@ class AppState extends ChangeNotifier {
       _channel!.sink.add(jsonEncode(messageData));
       replyingTo = null;
     }
+
     notifyListeners();
   }
 
@@ -236,6 +690,28 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _channel?.sink.close();
+    _voiceSignalChannel?.sink.close();
+
+    for (final peerConnection in _peerConnections.values) {
+      peerConnection.close();
+    }
+
+    for (final stream in _remoteStreams.values) {
+      for (final track in stream.getTracks()) {
+        track.stop();
+      }
+      stream.dispose();
+    }
+
+    final localStream = _localStream;
+    if (localStream != null) {
+      for (final track in localStream.getTracks()) {
+        track.stop();
+      }
+      localStream.dispose();
+    }
+
     scrollController.dispose();
     _highlightTimer?.cancel();
     super.dispose();

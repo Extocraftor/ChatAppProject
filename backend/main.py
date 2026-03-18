@@ -1,22 +1,25 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
-from typing import List, Dict
+from typing import Any, Dict, List
 import json
 
-from database import engine, Base, get_db
+from database import engine, get_db
 import models, schemas
 from passlib.context import CryptContext
 
 # Password hashing configuration
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def get_password_hash(password):
+
+def get_password_hash(password: str) -> str:
     # Bcrypt has a 72-byte limit. We truncate to 64 for extra safety.
     return pwd_context.hash(password[:64])
 
-def verify_password(plain_password, hashed_password):
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password[:64], hashed_password)
+
 
 # Create all tables on startup
 models.Base.metadata.create_all(bind=engine)
@@ -31,7 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Connection Manager for Rooms/Channels
+
+# Connection Manager for text channels
 class ConnectionManager:
     def __init__(self):
         # Maps channel_id to a list of active WebSockets
@@ -44,25 +48,111 @@ class ConnectionManager:
         self.active_connections[channel_id].append(websocket)
 
     def disconnect(self, websocket: WebSocket, channel_id: int):
-        if channel_id in self.active_connections:
-            self.active_connections[channel_id].remove(websocket)
+        connections = self.active_connections.get(channel_id)
+        if not connections:
+            return
+        if websocket in connections:
+            connections.remove(websocket)
+        if not connections:
+            self.active_connections.pop(channel_id, None)
 
     async def broadcast(self, message: str, channel_id: int):
-        if channel_id in self.active_connections:
-            for connection in self.active_connections[channel_id]:
+        connections = self.active_connections.get(channel_id, [])
+        for connection in list(connections):
+            try:
                 await connection.send_text(message)
+            except Exception:
+                self.disconnect(connection, channel_id)
+
+
+# Connection manager for voice channels/WebRTC signaling
+class VoiceConnectionManager:
+    def __init__(self):
+        # channel_id -> user_id -> websocket
+        self.active_connections: Dict[int, Dict[int, WebSocket]] = {}
+        # channel_id -> user_id -> username
+        self.usernames: Dict[int, Dict[int, str]] = {}
+        # channel_id -> user_id -> muted state
+        self.mute_states: Dict[int, Dict[int, bool]] = {}
+
+    async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
+        await websocket.accept()
+        if channel_id not in self.active_connections:
+            self.active_connections[channel_id] = {}
+        if channel_id not in self.usernames:
+            self.usernames[channel_id] = {}
+        if channel_id not in self.mute_states:
+            self.mute_states[channel_id] = {}
+
+        self.active_connections[channel_id][user_id] = websocket
+        self.usernames[channel_id][user_id] = username
+        self.mute_states[channel_id].setdefault(user_id, False)
+
+    def disconnect(self, channel_id: int, user_id: int):
+        if channel_id in self.active_connections:
+            self.active_connections[channel_id].pop(user_id, None)
+            if not self.active_connections[channel_id]:
+                self.active_connections.pop(channel_id, None)
+
+        if channel_id in self.usernames:
+            self.usernames[channel_id].pop(user_id, None)
+            if not self.usernames[channel_id]:
+                self.usernames.pop(channel_id, None)
+
+        if channel_id in self.mute_states:
+            self.mute_states[channel_id].pop(user_id, None)
+            if not self.mute_states[channel_id]:
+                self.mute_states.pop(channel_id, None)
+
+    def participants(self, channel_id: int) -> List[Dict[str, Any]]:
+        usernames = self.usernames.get(channel_id, {})
+        mute_states = self.mute_states.get(channel_id, {})
+        return [
+            {
+                "user_id": user_id,
+                "username": usernames.get(user_id, f"User #{user_id}"),
+                "is_muted": mute_states.get(user_id, False),
+            }
+            for user_id in usernames.keys()
+        ]
+
+    def update_mute_state(self, channel_id: int, user_id: int, is_muted: bool):
+        if channel_id not in self.mute_states:
+            self.mute_states[channel_id] = {}
+        self.mute_states[channel_id][user_id] = is_muted
+
+    async def send_to_user(self, channel_id: int, user_id: int, payload: Dict[str, Any]):
+        channel_connections = self.active_connections.get(channel_id, {})
+        websocket = channel_connections.get(user_id)
+        if websocket is None:
+            return
+
+        try:
+            await websocket.send_text(json.dumps(payload))
+        except Exception:
+            self.disconnect(channel_id, user_id)
+
+    async def broadcast(self, channel_id: int, payload: Dict[str, Any], exclude_user_id: int | None = None):
+        channel_connections = self.active_connections.get(channel_id, {})
+        for user_id in list(channel_connections.keys()):
+            if exclude_user_id is not None and user_id == exclude_user_id:
+                continue
+            await self.send_to_user(channel_id, user_id, payload)
+
 
 manager = ConnectionManager()
+voice_manager = VoiceConnectionManager()
+
 
 # --- REST ENDPOINTS ---
 
+
 @app.post("/users/", response_model=schemas.UserSchema)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    # Check if username exists
     existing_user = db.query(models.User).filter(models.User.username == user.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already registered")
-    
+
     hashed_pwd = get_password_hash(user.password)
     db_user = models.User(username=user.username, hashed_password=hashed_pwd)
     db.add(db_user)
@@ -74,9 +164,11 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.refresh(db_user)
     return db_user
 
+
 @app.get("/users/", response_model=List[schemas.UserSchema])
 def list_users(db: Session = Depends(get_db)):
     return db.query(models.User).all()
+
 
 @app.post("/login/", response_model=schemas.UserSchema)
 def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -84,6 +176,7 @@ def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
     if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     return db_user
+
 
 @app.post("/channels/", response_model=schemas.ChannelSchema)
 def create_channel(channel: schemas.ChannelCreate, db: Session = Depends(get_db)):
@@ -93,18 +186,68 @@ def create_channel(channel: schemas.ChannelCreate, db: Session = Depends(get_db)
     db.refresh(db_channel)
     return db_channel
 
+
 @app.get("/channels/", response_model=List[schemas.ChannelSchema])
 def list_channels(db: Session = Depends(get_db)):
     return db.query(models.Channel).all()
 
+
 @app.get("/channels/{channel_id}/messages/", response_model=List[schemas.MessageSchema])
 def get_messages(channel_id: int, db: Session = Depends(get_db)):
-    return db.query(models.Message).options(joinedload(models.Message.user)).filter(models.Message.channel_id == channel_id).order_by(models.Message.timestamp.asc()).all()
+    return (
+        db.query(models.Message)
+        .options(joinedload(models.Message.user))
+        .filter(models.Message.channel_id == channel_id)
+        .order_by(models.Message.timestamp.asc())
+        .all()
+    )
 
-# --- WEBSOCKET ENDPOINT ---
+
+@app.post("/voice-channels/", response_model=schemas.VoiceChannelSchema)
+def create_voice_channel(channel: schemas.VoiceChannelCreate, db: Session = Depends(get_db)):
+    existing_channel = (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.name == channel.name)
+        .first()
+    )
+    if existing_channel:
+        raise HTTPException(status_code=400, detail="Voice channel already exists")
+
+    db_channel = models.VoiceChannel(name=channel.name, description=channel.description)
+    db.add(db_channel)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Error creating voice channel")
+
+    db.refresh(db_channel)
+    return db_channel
+
+
+@app.get("/voice-channels/", response_model=List[schemas.VoiceChannelSchema])
+def list_voice_channels(db: Session = Depends(get_db)):
+    return db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+
+
+@app.get(
+    "/voice-channels/{voice_channel_id}/participants/",
+    response_model=List[schemas.VoiceParticipantSchema],
+)
+def list_voice_channel_participants(voice_channel_id: int):
+    return voice_manager.participants(voice_channel_id)
+
+
+# --- WEBSOCKET ENDPOINTS ---
+
 
 @app.websocket("/ws/{channel_id}/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, channel_id: int, user_id: int, db: Session = Depends(get_db)):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    channel_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+):
     await manager.connect(websocket, channel_id)
     db_user = db.query(models.User).filter(models.User.id == user_id).first()
     username = db_user.username if db_user else "Unknown"
@@ -116,80 +259,206 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, user_id: int
                 data_json = json.loads(data_str)
                 msg_type = data_json.get("type", "new_message")
                 content = data_json.get("content")
-                
+
                 if msg_type == "new_message":
                     parent_id = data_json.get("parent_id")
-                    db_message = models.Message(content=content, user_id=user_id, channel_id=channel_id, parent_id=parent_id)
+                    db_message = models.Message(
+                        content=content,
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        parent_id=parent_id,
+                    )
                     db.add(db_message)
                     db.commit()
                     db.refresh(db_message)
-                    
-                    broadcast_msg = json.dumps({
-                        "type": "new_message",
-                        "id": db_message.id,
-                        "user_id": user_id,
-                        "username": username,
-                        "content": content,
-                        "timestamp": str(db_message.timestamp),
-                        "parent_id": db_message.parent_id,
-                        "parent_username": db_message.parent_username,
-                        "parent_content": db_message.parent_content
-                    })
-                
+
+                    broadcast_msg = json.dumps(
+                        {
+                            "type": "new_message",
+                            "id": db_message.id,
+                            "user_id": user_id,
+                            "username": username,
+                            "content": content,
+                            "timestamp": str(db_message.timestamp),
+                            "parent_id": db_message.parent_id,
+                            "parent_username": db_message.parent_username,
+                            "parent_content": db_message.parent_content,
+                        }
+                    )
+
                 elif msg_type == "edit_message":
                     msg_id = data_json.get("id")
-                    db_message = db.query(models.Message).filter(models.Message.id == msg_id, models.Message.user_id == user_id).first()
-                    if db_message:
-                        db_message.content = content
-                        db.commit()
-                        db.refresh(db_message)
-                        
-                        broadcast_msg = json.dumps({
+                    db_message = (
+                        db.query(models.Message)
+                        .filter(models.Message.id == msg_id, models.Message.user_id == user_id)
+                        .first()
+                    )
+                    if not db_message:
+                        continue
+
+                    db_message.content = content
+                    db.commit()
+                    db.refresh(db_message)
+
+                    broadcast_msg = json.dumps(
+                        {
                             "type": "edit_message",
                             "id": db_message.id,
-                            "content": content
-                        })
-                    else:
-                        continue
-                
+                            "content": content,
+                        }
+                    )
+
                 elif msg_type == "delete_message":
                     msg_id = data_json.get("id")
-                    db_message = db.query(models.Message).filter(models.Message.id == msg_id, models.Message.user_id == user_id).first()
-                    if db_message:
-                        # Before deleting, null out parent_id of any replies to prevent FK errors or delete them too
-                        # For simplicity, we'll just delete the message. 
-                        # SQLAlchemy handles FKs based on how you set up the model.
-                        db.delete(db_message)
-                        db.commit()
-                        
-                        broadcast_msg = json.dumps({
-                            "type": "delete_message",
-                            "id": msg_id
-                        })
-                    else:
+                    db_message = (
+                        db.query(models.Message)
+                        .filter(models.Message.id == msg_id, models.Message.user_id == user_id)
+                        .first()
+                    )
+                    if not db_message:
                         continue
-                
+
+                    db.delete(db_message)
+                    db.commit()
+
+                    broadcast_msg = json.dumps(
+                        {
+                            "type": "delete_message",
+                            "id": msg_id,
+                        }
+                    )
+                else:
+                    continue
+
                 await manager.broadcast(broadcast_msg, channel_id)
-                
+
             except json.JSONDecodeError:
-                # Fallback for simple text (legacy/simple clients)
                 db_message = models.Message(content=data_str, user_id=user_id, channel_id=channel_id)
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
-                broadcast_msg = json.dumps({
-                    "type": "new_message",
-                    "id": db_message.id,
-                    "user_id": user_id,
-                    "username": username,
-                    "content": data_str,
-                    "timestamp": str(db_message.timestamp)
-                })
+                broadcast_msg = json.dumps(
+                    {
+                        "type": "new_message",
+                        "id": db_message.id,
+                        "user_id": user_id,
+                        "username": username,
+                        "content": data_str,
+                        "timestamp": str(db_message.timestamp),
+                    }
+                )
                 await manager.broadcast(broadcast_msg, channel_id)
-            
+
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
 
+
+@app.websocket("/ws/voice/{voice_channel_id}/{user_id}")
+async def voice_websocket_endpoint(
+    websocket: WebSocket,
+    voice_channel_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        await websocket.close(code=1008)
+        return
+
+    db_voice_channel = (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.id == voice_channel_id)
+        .first()
+    )
+    if not db_voice_channel:
+        await websocket.close(code=1008)
+        return
+
+    username = db_user.username
+    await voice_manager.connect(websocket, voice_channel_id, user_id, username)
+
+    await voice_manager.send_to_user(
+        voice_channel_id,
+        user_id,
+        {
+            "type": "voice_state",
+            "participants": voice_manager.participants(voice_channel_id),
+        },
+    )
+
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "participant_joined",
+            "user_id": user_id,
+            "username": username,
+            "is_muted": voice_manager.mute_states.get(voice_channel_id, {}).get(user_id, False),
+        },
+        exclude_user_id=user_id,
+    )
+
+    try:
+        while True:
+            data_str = await websocket.receive_text()
+            try:
+                data_json = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = data_json.get("type")
+
+            if msg_type in {"offer", "answer", "ice_candidate"}:
+                target_user_id = data_json.get("target_user_id")
+                if target_user_id is None:
+                    continue
+
+                try:
+                    target_user_id = int(target_user_id)
+                except (TypeError, ValueError):
+                    continue
+
+                relay_payload: Dict[str, Any] = {
+                    "type": msg_type,
+                    "from_user_id": user_id,
+                    "username": username,
+                }
+
+                if msg_type in {"offer", "answer"}:
+                    relay_payload["sdp"] = data_json.get("sdp")
+                else:
+                    relay_payload["candidate"] = data_json.get("candidate")
+
+                await voice_manager.send_to_user(voice_channel_id, target_user_id, relay_payload)
+
+            elif msg_type == "mute_state":
+                is_muted = bool(data_json.get("is_muted", False))
+                voice_manager.update_mute_state(voice_channel_id, user_id, is_muted)
+                await voice_manager.broadcast(
+                    voice_channel_id,
+                    {
+                        "type": "mute_state",
+                        "user_id": user_id,
+                        "is_muted": is_muted,
+                    },
+                )
+
+            elif msg_type == "ping":
+                await voice_manager.send_to_user(voice_channel_id, user_id, {"type": "pong"})
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        voice_manager.disconnect(voice_channel_id, user_id)
+        await voice_manager.broadcast(
+            voice_channel_id,
+            {
+                "type": "participant_left",
+                "user_id": user_id,
+            },
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
