@@ -228,16 +228,20 @@ class AppState extends ChangeNotifier {
     voiceError = null;
     notifyListeners();
 
+    var failedStep = 'getUserMedia';
     try {
       _localStream = await navigator.mediaDevices.getUserMedia({
         'audio': true,
         'video': false,
       });
 
+      failedStep = 'signal connection';
       activeVoiceChannel = channel;
-      _voiceSignalChannel = WebSocketChannel.connect(
+      final signalChannel = WebSocketChannel.connect(
         Uri.parse("$wsUrl/voice/${channel.id}/${currentUser!.id}"),
       );
+      await signalChannel.ready;
+      _voiceSignalChannel = signalChannel;
 
       _voiceSignalChannel!.stream.listen(
         (data) {
@@ -255,8 +259,10 @@ class AppState extends ChangeNotifier {
       _voiceConnecting = false;
       notifyListeners();
       return true;
-    } catch (e) {
-      voiceError = "Unable to join voice channel: $e";
+    } catch (e, stackTrace) {
+      debugPrint('joinVoiceChannel failed during $failedStep: $e');
+      debugPrintStack(stackTrace: stackTrace);
+      voiceError = "Unable to join voice channel ($failedStep): $e";
       _voiceConnecting = false;
       await leaveVoiceChannel(notify: false, clearError: false);
       notifyListeners();
