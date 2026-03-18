@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -33,6 +34,7 @@ class AppState extends ChangeNotifier {
   MediaStream? _localStream;
   final Map<int, RTCPeerConnection> _peerConnections = {};
   final Map<int, MediaStream> _remoteStreams = {};
+  Future<void>? _leaveVoiceChannelTask;
   bool isSelfMuted = false;
   bool _voiceConnecting = false;
   String? voiceError;
@@ -151,7 +153,8 @@ class AppState extends ChangeNotifier {
       voiceChannels = data.map((c) => VoiceChannel.fromJson(c)).toList();
 
       if (activeVoiceChannel != null) {
-        final stillExists = voiceChannels.any((c) => c.id == activeVoiceChannel!.id);
+        final stillExists =
+            voiceChannels.any((c) => c.id == activeVoiceChannel!.id);
         if (!stillExists) {
           await leaveVoiceChannel();
         }
@@ -162,7 +165,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> fetchMessages(int channelId) async {
-    final response = await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
+    final response =
+        await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       messages = data.map((m) => Message.fromJson(m)).toList();
@@ -531,7 +535,8 @@ class AppState extends ChangeNotifier {
 
     final selfParticipant = voiceParticipants[currentUser!.id];
     if (selfParticipant != null) {
-      voiceParticipants[currentUser!.id] = selfParticipant.copyWith(isMuted: isSelfMuted);
+      voiceParticipants[currentUser!.id] =
+          selfParticipant.copyWith(isMuted: isSelfMuted);
     }
 
     _sendVoiceSignal({
@@ -542,7 +547,36 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> leaveVoiceChannel({bool notify = true, bool clearError = true}) async {
+  Future<void> leaveVoiceChannel(
+      {bool notify = true, bool clearError = true}) async {
+    final existingTask = _leaveVoiceChannelTask;
+    if (existingTask != null) {
+      await existingTask;
+      if (notify) {
+        notifyListeners();
+      }
+      return;
+    }
+
+    final task = _leaveVoiceChannelInternal(
+      notify: notify,
+      clearError: clearError,
+    );
+    _leaveVoiceChannelTask = task;
+
+    try {
+      await task;
+    } finally {
+      if (identical(_leaveVoiceChannelTask, task)) {
+        _leaveVoiceChannelTask = null;
+      }
+    }
+  }
+
+  Future<void> _leaveVoiceChannelInternal({
+    required bool notify,
+    required bool clearError,
+  }) async {
     if (clearError) {
       voiceError = null;
     }
@@ -555,7 +589,7 @@ class AppState extends ChangeNotifier {
     isSelfMuted = false;
 
     if (signalChannel != null) {
-      signalChannel.sink.close();
+      await signalChannel.sink.close();
     }
 
     for (final userId in _peerConnections.keys.toList()) {
@@ -564,21 +598,15 @@ class AppState extends ChangeNotifier {
 
     _peerConnections.clear();
 
-    for (final stream in _remoteStreams.values) {
-      for (final track in stream.getTracks()) {
-        track.stop();
-      }
-      await stream.dispose();
+    for (final stream in _remoteStreams.values.toSet()) {
+      await _disposeStreamSafely(stream);
     }
     _remoteStreams.clear();
 
     final localStream = _localStream;
+    _localStream = null;
     if (localStream != null) {
-      for (final track in localStream.getTracks()) {
-        track.stop();
-      }
-      await localStream.dispose();
-      _localStream = null;
+      await _disposeStreamSafely(localStream);
     }
 
     voiceParticipants.clear();
@@ -591,16 +619,56 @@ class AppState extends ChangeNotifier {
   Future<void> _closePeerConnection(int remoteUserId) async {
     final peerConnection = _peerConnections.remove(remoteUserId);
     if (peerConnection != null) {
-      await peerConnection.close();
+      peerConnection.onIceCandidate = null;
+      peerConnection.onTrack = null;
+      peerConnection.onConnectionState = null;
+      await _closePeerConnectionSafely(peerConnection);
     }
 
     final remoteStream = _remoteStreams.remove(remoteUserId);
     if (remoteStream != null) {
-      for (final track in remoteStream.getTracks()) {
-        track.stop();
-      }
-      await remoteStream.dispose();
+      await _disposeStreamSafely(remoteStream);
     }
+  }
+
+  Future<void> _closePeerConnectionSafely(
+      RTCPeerConnection peerConnection) async {
+    try {
+      await peerConnection.close();
+    } catch (_) {
+      // Ignore already-closed peer connections during teardown races.
+    }
+  }
+
+  Future<void> _disposeStreamSafely(MediaStream stream) async {
+    for (final track in stream.getTracks()) {
+      try {
+        track.stop();
+      } catch (_) {
+        // Track may already be stopped by the platform.
+      }
+    }
+
+    try {
+      await stream.dispose();
+    } catch (error) {
+      if (!_isMissingStreamError(error)) {
+        rethrow;
+      }
+    }
+  }
+
+  bool _isMissingStreamError(Object error) {
+    if (error is PlatformException) {
+      final code = error.code.toLowerCase();
+      final message = (error.message ?? '').toLowerCase();
+      return code.contains('mediastreamdisposefailed') &&
+          message.contains('not found');
+    }
+
+    final errorText = error.toString().toLowerCase();
+    return errorText.contains('mediastreamdisposefailed') &&
+        errorText.contains('not found');
   }
 
   void setReplyingTo(Message? message) {
@@ -694,24 +762,24 @@ class AppState extends ChangeNotifier {
     _voiceSignalChannel?.sink.close();
 
     for (final peerConnection in _peerConnections.values) {
-      peerConnection.close();
+      peerConnection.onIceCandidate = null;
+      peerConnection.onTrack = null;
+      peerConnection.onConnectionState = null;
+      unawaited(_closePeerConnectionSafely(peerConnection));
     }
 
-    for (final stream in _remoteStreams.values) {
-      for (final track in stream.getTracks()) {
-        track.stop();
-      }
-      stream.dispose();
+    for (final stream in _remoteStreams.values.toSet()) {
+      unawaited(_disposeStreamSafely(stream));
     }
 
     final localStream = _localStream;
     if (localStream != null) {
-      for (final track in localStream.getTracks()) {
-        track.stop();
-      }
-      localStream.dispose();
+      unawaited(_disposeStreamSafely(localStream));
     }
 
+    _peerConnections.clear();
+    _remoteStreams.clear();
+    _localStream = null;
     scrollController.dispose();
     _highlightTimer?.cancel();
     super.dispose();

@@ -15,13 +15,14 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isRegistering = false;
   bool _isLoading = false;
 
-  void _submit() async {
+  Future<void> _submit() async {
     final username = _userController.text.trim();
     final password = _passController.text.trim();
 
     if (username.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please enter both username and password")),
+        const SnackBar(
+            content: Text("Please enter both username and password")),
       );
       return;
     }
@@ -29,27 +30,44 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
     final state = context.read<AppState>();
 
-    if (_isRegistering) {
-      final error = await state.register(username, password);
-      if (error == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Registration successful! Please log in.")),
-        );
-        setState(() => _isRegistering = false);
+    try {
+      if (_isRegistering) {
+        final error = await state.register(username, password);
+        if (!mounted) return;
+
+        if (error == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text("Registration successful! Please log in.")),
+          );
+          setState(() => _isRegistering = false);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(error)),
+          );
+        }
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error)),
-        );
+        final error = await state.login(username, password);
+        if (!mounted) return;
+
+        if (error != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(error)),
+          );
+        }
       }
-    } else {
-      final error = await state.login(username, password);
-      if (error != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error)),
-        );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
       }
     }
-    setState(() => _isLoading = false);
+  }
+
+  @override
+  void dispose() {
+    _userController.dispose();
+    _passController.dispose();
+    super.dispose();
   }
 
   @override
@@ -68,11 +86,14 @@ class _LoginScreenState extends State<LoginScreen> {
             children: [
               Text(
                 _isRegistering ? "Create an account" : "Welcome back!",
-                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                style:
+                    const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
               Text(
-                _isRegistering ? "Join the conversation" : "We're so excited to see you again!",
+                _isRegistering
+                    ? "Join the conversation"
+                    : "We're so excited to see you again!",
                 style: const TextStyle(color: Colors.grey),
               ),
               const SizedBox(height: 24),
@@ -103,15 +124,21 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: ElevatedButton(
                   onPressed: _isLoading ? null : _submit,
                   child: _isLoading
-                      ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2))
                       : Text(_isRegistering ? "Register" : "Log In"),
                 ),
               ),
               const SizedBox(height: 16),
               TextButton(
-                onPressed: () => setState(() => _isRegistering = !_isRegistering),
+                onPressed: () =>
+                    setState(() => _isRegistering = !_isRegistering),
                 child: Text(
-                  _isRegistering ? "Already have an account?" : "Need an account? Register",
+                  _isRegistering
+                      ? "Already have an account?"
+                      : "Need an account? Register",
                   style: const TextStyle(color: Color(0xFF00AFF4)),
                 ),
               ),
