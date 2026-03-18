@@ -46,7 +46,8 @@ class _MessageItemState extends State<MessageItem> {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF2F3136),
         title: const Text("Delete Message"),
-        content: const Text("Are you sure you want to delete this message? This cannot be undone."),
+        content: const Text(
+            "Are you sure you want to delete this message? This cannot be undone."),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -77,7 +78,11 @@ class _MessageItemState extends State<MessageItem> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        color: isHighlighted ? Colors.yellow.withOpacity(0.1) : (_isHovered ? Colors.white.withOpacity(0.05) : Colors.transparent),
+        color: isHighlighted
+            ? Colors.yellow.withValues(alpha: 0.1)
+            : (_isHovered
+                ? Colors.white.withValues(alpha: 0.05)
+                : Colors.transparent),
         child: Stack(
           clipBehavior: Clip.none,
           children: [
@@ -88,20 +93,27 @@ class _MessageItemState extends State<MessageItem> {
                   Padding(
                     padding: const EdgeInsets.only(left: 36, bottom: 4),
                     child: InkWell(
-                      onTap: () => state.highlightMessage(widget.message.parentId!),
+                      onTap: () =>
+                          state.highlightMessage(widget.message.parentId!),
                       child: Row(
                         children: [
                           const Icon(Icons.reply, size: 14, color: Colors.grey),
                           const SizedBox(width: 4),
                           Text(
                             widget.message.parentUsername ?? "Unknown",
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey),
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               widget.message.parentContent ?? "",
-                              style: const TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey,
+                                  fontStyle: FontStyle.italic),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
@@ -126,16 +138,22 @@ class _MessageItemState extends State<MessageItem> {
                             children: [
                               Text(
                                 widget.message.username,
-                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white),
                               ),
                               const SizedBox(width: 8),
                               Text(
                                 _formatTimestamp(widget.message.timestamp),
-                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                style: const TextStyle(
+                                    fontSize: 12, color: Colors.grey),
                               ),
                             ],
                           ),
-                          Text(widget.message.content, style: const TextStyle(color: Color(0xFFDCDDDE))),
+                          SelectableText(
+                            widget.message.content,
+                            style: const TextStyle(color: Color(0xFFDCDDDE)),
+                          ),
                         ],
                       ),
                     ),
@@ -151,26 +169,32 @@ class _MessageItemState extends State<MessageItem> {
                   decoration: BoxDecoration(
                     color: const Color(0xFF2F3136),
                     borderRadius: BorderRadius.circular(4),
-                    boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 4)
+                    ],
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.reply, size: 18, color: Colors.grey),
+                        icon: const Icon(Icons.reply,
+                            size: 18, color: Colors.grey),
                         onPressed: () => state.setReplyingTo(widget.message),
                         tooltip: "Reply",
                         constraints: const BoxConstraints(),
                       ),
                       if (isOwnMessage) ...[
                         IconButton(
-                          icon: const Icon(Icons.edit, size: 18, color: Colors.grey),
-                          onPressed: () => state.setEditingMessage(widget.message),
+                          icon: const Icon(Icons.edit,
+                              size: 18, color: Colors.grey),
+                          onPressed: () =>
+                              state.setEditingMessage(widget.message),
                           tooltip: "Edit",
                           constraints: const BoxConstraints(),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.delete, size: 18, color: Colors.redAccent),
+                          icon: const Icon(Icons.delete,
+                              size: 18, color: Colors.redAccent),
                           onPressed: () => _showDeleteDialog(context, state),
                           tooltip: "Delete",
                           constraints: const BoxConstraints(),
