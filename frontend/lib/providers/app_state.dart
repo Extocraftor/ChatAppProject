@@ -39,6 +39,7 @@ class AppState extends ChangeNotifier {
   Future<void>? _leaveVoiceChannelTask;
   bool isSelfMuted = false;
   bool _voiceConnecting = false;
+  bool _voiceJoinInProgress = false;
   String? voiceError;
 
   // Interaction state
@@ -220,10 +221,15 @@ class AppState extends ChangeNotifier {
       return false;
     }
 
+    if (_voiceJoinInProgress) {
+      return false;
+    }
+
     if (activeVoiceChannel?.id == channel.id && _voiceSignalChannel != null) {
       return true;
     }
 
+    _voiceJoinInProgress = true;
     await leaveVoiceChannel(notify: false);
 
     _voiceConnecting = true;
@@ -270,6 +276,8 @@ class AppState extends ChangeNotifier {
       await leaveVoiceChannel(notify: false, clearError: false);
       notifyListeners();
       return false;
+    } finally {
+      _voiceJoinInProgress = false;
     }
   }
 

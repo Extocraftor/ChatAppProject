@@ -57,6 +57,10 @@ class Sidebar extends StatelessWidget {
     AppState state,
     VoiceChannel channel,
   ) async {
+    if (state.isVoiceConnecting) {
+      return;
+    }
+
     final isActive = state.activeVoiceChannel?.id == channel.id;
     if (isActive) {
       await state.leaveVoiceChannel();
@@ -133,16 +137,19 @@ class Sidebar extends StatelessWidget {
                 _sectionHeader(
                   title: "TEXT CHANNELS",
                   icon: Icons.tag,
-                  onAdd: () => _showCreateChannelDialog(context, state, isVoice: false),
+                  onAdd: () =>
+                      _showCreateChannelDialog(context, state, isVoice: false),
                 ),
                 ...state.channels.map((channel) {
                   final isActive = state.activeChannel?.id == channel.id;
                   return ListTile(
                     dense: true,
-                    leading: const Text("#", style: TextStyle(fontSize: 20, color: Colors.grey)),
+                    leading: const Text("#",
+                        style: TextStyle(fontSize: 20, color: Colors.grey)),
                     title: Text(
                       channel.name,
-                      style: TextStyle(color: isActive ? Colors.white : Colors.grey),
+                      style: TextStyle(
+                          color: isActive ? Colors.white : Colors.grey),
                     ),
                     onTap: () => state.selectChannel(channel),
                     selected: isActive,
@@ -153,11 +160,13 @@ class Sidebar extends StatelessWidget {
                 _sectionHeader(
                   title: "VOICE CHANNELS",
                   icon: Icons.volume_up,
-                  onAdd: () => _showCreateChannelDialog(context, state, isVoice: true),
+                  onAdd: () =>
+                      _showCreateChannelDialog(context, state, isVoice: true),
                 ),
                 ...state.voiceChannels.map((channel) {
                   final isActive = state.activeVoiceChannel?.id == channel.id;
-                  final participants = isActive ? state.voiceParticipants.length : 0;
+                  final participants =
+                      isActive ? state.voiceParticipants.length : 0;
                   return ListTile(
                     dense: true,
                     leading: Icon(
@@ -167,15 +176,18 @@ class Sidebar extends StatelessWidget {
                     ),
                     title: Text(
                       channel.name,
-                      style: TextStyle(color: isActive ? Colors.white : Colors.grey),
+                      style: TextStyle(
+                          color: isActive ? Colors.white : Colors.grey),
                     ),
                     subtitle: isActive ? Text("$participants connected") : null,
                     trailing: isActive
-                        ? const Icon(Icons.call_end, color: Colors.redAccent, size: 18)
+                        ? const Icon(Icons.call_end,
+                            color: Colors.redAccent, size: 18)
                         : null,
                     selected: isActive,
                     selectedTileColor: const Color(0xFF40444B),
-                    onTap: () => _handleVoiceChannelTap(context, state, channel),
+                    onTap: () =>
+                        _handleVoiceChannelTap(context, state, channel),
                   );
                 }),
               ],
@@ -190,7 +202,8 @@ class Sidebar extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      const Icon(Icons.graphic_eq, size: 16, color: Colors.greenAccent),
+                      const Icon(Icons.graphic_eq,
+                          size: 16, color: Colors.greenAccent),
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
@@ -223,7 +236,8 @@ class Sidebar extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       IconButton(
-                        icon: const Icon(Icons.call_end, color: Colors.redAccent),
+                        icon:
+                            const Icon(Icons.call_end, color: Colors.redAccent),
                         onPressed: () => state.leaveVoiceChannel(),
                         tooltip: "Leave voice channel",
                       ),

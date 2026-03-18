@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import Any, Dict, List
 import json
 import os
+import logging
 
 from database import engine, get_db
 import models, schemas
@@ -26,6 +27,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+logger = logging.getLogger("uvicorn.error")
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,14 +87,31 @@ class VoiceConnectionManager:
         if channel_id not in self.mute_states:
             self.mute_states[channel_id] = {}
 
+        # If the same user reconnects quickly, close the stale socket first.
+        existing_socket = self.active_connections[channel_id].get(user_id)
+        if existing_socket is not None and existing_socket is not websocket:
+            try:
+                await existing_socket.close(code=1000)
+            except Exception:
+                pass
+
         self.active_connections[channel_id][user_id] = websocket
         self.usernames[channel_id][user_id] = username
         self.mute_states[channel_id].setdefault(user_id, False)
 
-    def disconnect(self, channel_id: int, user_id: int):
+    def disconnect(self, channel_id: int, user_id: int, websocket: WebSocket | None = None) -> bool:
+        removed = False
         if channel_id in self.active_connections:
-            self.active_connections[channel_id].pop(user_id, None)
-            if not self.active_connections[channel_id]:
+            channel_connections = self.active_connections[channel_id]
+            current_socket = channel_connections.get(user_id)
+            # Ignore stale-disconnect callbacks from sockets that were replaced.
+            if websocket is not None and current_socket is not websocket:
+                return False
+
+            if user_id in channel_connections:
+                channel_connections.pop(user_id, None)
+                removed = True
+            if not channel_connections:
                 self.active_connections.pop(channel_id, None)
 
         if channel_id in self.usernames:
@@ -104,6 +123,7 @@ class VoiceConnectionManager:
             self.mute_states[channel_id].pop(user_id, None)
             if not self.mute_states[channel_id]:
                 self.mute_states.pop(channel_id, None)
+        return removed
 
     def participants(self, channel_id: int) -> List[Dict[str, Any]]:
         usernames = self.usernames.get(channel_id, {})
@@ -131,7 +151,7 @@ class VoiceConnectionManager:
         try:
             await websocket.send_text(json.dumps(payload))
         except Exception:
-            self.disconnect(channel_id, user_id)
+            self.disconnect(channel_id, user_id, websocket=websocket)
 
     async def broadcast(self, channel_id: int, payload: Dict[str, Any], exclude_user_id: int | None = None):
         channel_connections = self.active_connections.get(channel_id, {})
@@ -377,6 +397,7 @@ async def voice_websocket_endpoint(
 
     username = db_user.username
     await voice_manager.connect(websocket, voice_channel_id, user_id, username)
+    logger.info("voice connect channel=%s user=%s", voice_channel_id, user_id)
 
     await voice_manager.send_to_user(
         voice_channel_id,
@@ -446,17 +467,29 @@ async def voice_websocket_endpoint(
             elif msg_type == "ping":
                 await voice_manager.send_to_user(voice_channel_id, user_id, {"type": "pong"})
 
-    except WebSocketDisconnect:
-        pass
-    finally:
-        voice_manager.disconnect(voice_channel_id, user_id)
-        await voice_manager.broadcast(
+    except WebSocketDisconnect as disconnect_event:
+        logger.info(
+            "voice disconnect channel=%s user=%s code=%s",
             voice_channel_id,
-            {
-                "type": "participant_left",
-                "user_id": user_id,
-            },
+            user_id,
+            disconnect_event.code,
         )
+    except Exception:
+        logger.exception("voice socket error channel=%s user=%s", voice_channel_id, user_id)
+    finally:
+        removed = voice_manager.disconnect(
+            voice_channel_id,
+            user_id,
+            websocket=websocket,
+        )
+        if removed:
+            await voice_manager.broadcast(
+                voice_channel_id,
+                {
+                    "type": "participant_left",
+                    "user_id": user_id,
+                },
+            )
 
 
 if __name__ == "__main__":
