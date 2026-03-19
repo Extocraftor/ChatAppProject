@@ -11,17 +11,27 @@ class MessageInput extends StatefulWidget {
 
 class _MessageInputState extends State<MessageInput> {
   final TextEditingController _controller = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
 
   void _submit() {
-    if (_controller.text.isNotEmpty) {
-      context.read<AppState>().sendMessage(_controller.text);
+    final content = _controller.text;
+    if (content.trim().isNotEmpty) {
+      context.read<AppState>().sendMessage(content);
       _controller.clear();
     }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusNode.requestFocus();
+      }
+    });
   }
 
   @override
-  void didUpdateWidget(covariant MessageInput oldWidget) {
-    super.didUpdateWidget(oldWidget);
+  void dispose() {
+    _focusNode.dispose();
+    _controller.dispose();
+    super.dispose();
   }
 
   @override
@@ -80,6 +90,7 @@ class _MessageInputState extends State<MessageInput> {
             ),
           TextField(
             controller: _controller,
+            focusNode: _focusNode,
             onSubmitted: (_) => _submit(),
             autofocus: true,
             decoration: InputDecoration(

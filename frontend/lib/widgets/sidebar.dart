@@ -5,8 +5,15 @@ import '../models/chat_models.dart';
 import '../providers/app_state.dart';
 import '../screens/voice_diagnostics_screen.dart';
 
-class Sidebar extends StatelessWidget {
+class Sidebar extends StatefulWidget {
   const Sidebar({super.key});
+
+  @override
+  State<Sidebar> createState() => _SidebarState();
+}
+
+class _SidebarState extends State<Sidebar> {
+  int? _expandedParticipantId;
 
   String _pingText(int? pingMs) {
     if (pingMs == null) {
@@ -101,10 +108,20 @@ class Sidebar extends StatelessWidget {
     final isActive = state.activeVoiceChannel?.id == channel.id;
     if (isActive) {
       await state.leaveVoiceChannel();
+      if (mounted) {
+        setState(() {
+          _expandedParticipantId = null;
+        });
+      }
       return;
     }
 
     final joined = await state.joinVoiceChannel(channel);
+    if (joined && mounted) {
+      setState(() {
+        _expandedParticipantId = null;
+      });
+    }
     if (!joined && state.voiceError != null && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(state.voiceError!)),
@@ -140,6 +157,100 @@ class Sidebar extends StatelessWidget {
             tooltip: "Create",
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _voiceParticipantTile(
+    BuildContext context,
+    AppState state,
+    VoiceParticipant participant,
+  ) {
+    final volume = state.voiceParticipantVolumeFor(participant.userId);
+    final isCurrentUser = participant.userId == state.currentUser?.id;
+    final userLabel = isCurrentUser
+        ? "${participant.username} (You)"
+        : participant.username;
+    final isExpanded = _expandedParticipantId == participant.userId;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(40, 0, 12, 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF36393F),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () {
+              setState(() {
+                _expandedParticipantId =
+                    isExpanded ? null : participant.userId;
+              });
+            },
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+              child: Row(
+                children: [
+                  Icon(
+                    participant.isMuted ? Icons.mic_off : Icons.mic,
+                    size: 14,
+                    color: participant.isMuted
+                        ? Colors.redAccent
+                        : Colors.greenAccent,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      userLabel,
+                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (isExpanded)
+                    Text(
+                      "${(volume * 100).round()}%",
+                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    isExpanded ? Icons.expand_less : Icons.tune,
+                    size: 14,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          AnimatedCrossFade(
+            firstChild: const SizedBox.shrink(),
+            secondChild: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 5,
+                  ),
+                ),
+                child: Slider(
+                  value: volume,
+                  min: 0,
+                  max: 1,
+                  divisions: 20,
+                  onChanged: (next) =>
+                      state.setVoiceParticipantVolume(participant.userId, next),
+                ),
+              ),
+            ),
+            crossFadeState: isExpanded
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            duration: const Duration(milliseconds: 150),
           ),
         ],
       ),
@@ -204,28 +315,53 @@ class Sidebar extends StatelessWidget {
                 ...state.voiceChannels.map((channel) {
                   final isActive = state.activeVoiceChannel?.id == channel.id;
                   final participants =
-                      isActive ? state.voiceParticipants.length : 0;
-                  return ListTile(
-                    dense: true,
-                    leading: Icon(
-                      isActive ? Icons.volume_up : Icons.volume_mute,
-                      size: 20,
-                      color: isActive ? Colors.white : Colors.grey,
-                    ),
-                    title: Text(
-                      channel.name,
-                      style: TextStyle(
-                          color: isActive ? Colors.white : Colors.grey),
-                    ),
-                    subtitle: isActive ? Text("$participants connected") : null,
-                    trailing: isActive
-                        ? const Icon(Icons.call_end,
-                            color: Colors.redAccent, size: 18)
-                        : null,
-                    selected: isActive,
-                    selectedTileColor: const Color(0xFF40444B),
-                    onTap: () =>
-                        _handleVoiceChannelTap(context, state, channel),
+                      isActive ? state.voiceParticipants.values.toList() : <VoiceParticipant>[];
+                  if (isActive) {
+                    final currentUserId = state.currentUser?.id;
+                    participants.sort((a, b) {
+                      final aIsCurrent = a.userId == currentUserId;
+                      final bIsCurrent = b.userId == currentUserId;
+                      if (aIsCurrent != bIsCurrent) {
+                        return aIsCurrent ? -1 : 1;
+                      }
+                      return a.username.toLowerCase().compareTo(
+                            b.username.toLowerCase(),
+                          );
+                    });
+                  }
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ListTile(
+                        dense: true,
+                        leading: Icon(
+                          isActive ? Icons.volume_up : Icons.volume_mute,
+                          size: 20,
+                          color: isActive ? Colors.white : Colors.grey,
+                        ),
+                        title: Text(
+                          channel.name,
+                          style: TextStyle(
+                              color: isActive ? Colors.white : Colors.grey),
+                        ),
+                        subtitle: isActive
+                            ? Text("${participants.length} connected")
+                            : null,
+                        trailing: isActive
+                            ? const Icon(Icons.call_end,
+                                color: Colors.redAccent, size: 18)
+                            : null,
+                        selected: isActive,
+                        selectedTileColor: const Color(0xFF40444B),
+                        onTap: () =>
+                            _handleVoiceChannelTap(context, state, channel),
+                      ),
+                      if (isActive && participants.isNotEmpty)
+                        ...participants
+                            .map((participant) =>
+                                _voiceParticipantTile(context, state, participant)),
+                    ],
                   );
                 }),
               ],

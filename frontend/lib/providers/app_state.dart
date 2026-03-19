@@ -38,6 +38,7 @@ class AppState extends ChangeNotifier {
   final Map<int, RTCPeerConnection> _peerConnections = {};
   final Map<int, MediaStream> _remoteStreams = {};
   final Map<int, RTCVideoRenderer> _remoteAudioRenderers = {};
+  final Map<int, double> _voiceParticipantVolumes = {};
   final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
   final Set<int> _remoteDescriptionReadyUsers = <int>{};
   Future<void> _voiceSignalProcessingQueue = Future.value();
@@ -152,6 +153,35 @@ class AppState extends ChangeNotifier {
   DateTime? get inputTestLastSampleAt => _inputTestLastSampleAt;
   Map<String, String> get inputTestRawStats =>
       Map<String, String>.unmodifiable(_inputTestRawStats);
+  Map<int, double> get voiceParticipantVolumes =>
+      Map<int, double>.unmodifiable(_voiceParticipantVolumes);
+
+  double voiceParticipantVolumeFor(int userId) {
+    return (_voiceParticipantVolumes[userId] ?? 1.0)
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+
+  void setVoiceParticipantVolume(int userId, double volume) {
+    final normalized = volume.clamp(0.0, 1.0).toDouble();
+    final previous = voiceParticipantVolumeFor(userId);
+    if ((previous - normalized).abs() < 0.001) {
+      return;
+    }
+
+    if ((normalized - 1.0).abs() < 0.001) {
+      _voiceParticipantVolumes.remove(userId);
+    } else {
+      _voiceParticipantVolumes[userId] = normalized;
+    }
+
+    final renderer = _remoteAudioRenderers[userId];
+    if (renderer != null) {
+      unawaited(_applyRemoteRendererVolume(renderer, normalized));
+    }
+
+    notifyListeners();
+  }
 
   Future<String?> register(String username, String password) async {
     try {
@@ -769,6 +799,10 @@ class AppState extends ChangeNotifier {
         voiceParticipants
           ..clear()
           ..addEntries(participants.map((p) => MapEntry(p.userId, p)));
+        final participantIds = participants.map((p) => p.userId).toSet();
+        _voiceParticipantVolumes.removeWhere(
+          (userId, _) => !participantIds.contains(userId),
+        );
 
         notifyListeners();
         return;
@@ -790,6 +824,7 @@ class AppState extends ChangeNotifier {
         final userId = payload['user_id'];
         if (userId is int) {
           voiceParticipants.remove(userId);
+          _voiceParticipantVolumes.remove(userId);
           await _closePeerConnection(userId);
           notifyListeners();
         }
@@ -1247,6 +1282,7 @@ class AppState extends ChangeNotifier {
     }
 
     voiceParticipants.clear();
+    _voiceParticipantVolumes.clear();
     _peerConnectionStates.clear();
 
     if (notify) {
@@ -1298,9 +1334,42 @@ class AppState extends ChangeNotifier {
       }
       shouldNotify = true;
     }
+    await _applyRemoteRendererVolume(
+      renderer,
+      voiceParticipantVolumeFor(remoteUserId),
+    );
 
     if (shouldNotify) {
       notifyListeners();
+    }
+  }
+
+  Future<void> _applyRemoteRendererVolume(
+    RTCVideoRenderer renderer,
+    double volume,
+  ) async {
+    final normalized = volume.clamp(0.0, 1.0).toDouble();
+    try {
+      renderer.muted = normalized <= 0.001;
+    } catch (_) {
+      // Some platforms throw if mute toggling isn't supported for this stream.
+    }
+
+    final stream = renderer.srcObject;
+    final audioTracks = stream?.getAudioTracks() ?? const <MediaStreamTrack>[];
+    if (audioTracks.isEmpty) {
+      return;
+    }
+
+    for (final track in audioTracks) {
+      try {
+        await Helper.setVolume(
+          normalized <= 0.001 ? 0.0001 : normalized,
+          track,
+        );
+      } catch (_) {
+        // Ignore volume failures on platforms that don't support remote track gain.
+      }
     }
   }
 
