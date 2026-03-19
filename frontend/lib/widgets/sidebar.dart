@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -291,7 +293,7 @@ class _SidebarState extends State<Sidebar> {
                   ),
                   if (isExpanded)
                     Text(
-                      "${(volume * 100).round()}%",
+                      "${min(200, (volume * 100).round())}%",
                       style: const TextStyle(fontSize: 11, color: Colors.grey),
                     ),
                   const SizedBox(width: 4),
@@ -304,35 +306,103 @@ class _SidebarState extends State<Sidebar> {
               ),
             ),
           ),
-          AnimatedCrossFade(
-            firstChild: const SizedBox.shrink(),
-            secondChild: Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-              child: SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackHeight: 2,
-                  thumbShape: const RoundSliderThumbShape(
-                    enabledThumbRadius: 5,
+          ExcludeSemantics(
+            child: AnimatedCrossFade(
+              firstChild: const SizedBox.shrink(),
+              secondChild: Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 5,
+                    ),
+                  ),
+                  child: Slider(
+                    value: volume,
+                    min: 0,
+                    max: 2,
+                    divisions: 40,
+                    onChanged: (next) =>
+                        state.setVoiceParticipantVolume(participant.userId, next),
                   ),
                 ),
-                child: Slider(
-                  value: volume,
-                  min: 0,
-                  max: 1,
-                  divisions: 20,
-                  onChanged: (next) =>
-                      state.setVoiceParticipantVolume(participant.userId, next),
-                ),
+              ),
+              crossFadeState: isExpanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 150),
+            ),
+          ),
+          if (isExpanded)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Row(
+                children: [
+                  TextButton(
+                    onPressed: () => _showVolumeInputDialog(
+                      context,
+                      state,
+                      participant.userId,
+                      volume,
+                    ),
+                    child: const Text("Enter value"),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "Current ${(volume * 100).round()}%",
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
               ),
             ),
-            crossFadeState: isExpanded
-                ? CrossFadeState.showSecond
-                : CrossFadeState.showFirst,
-            duration: const Duration(milliseconds: 150),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showVolumeInputDialog(
+    BuildContext context,
+    AppState state,
+    int userId,
+    double currentVolume,
+  ) async {
+    final controller = TextEditingController(
+      text: (currentVolume * 100).round().toString(),
+    );
+    final confirmed = await showDialog<double>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF2F3136),
+        title: const Text("Set volume"),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            suffixText: "%",
+            hintText: "0-500",
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop<double>(context, null),
+            child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final parsed = double.tryParse(controller.text);
+              Navigator.pop<double>(
+                  context, parsed != null ? parsed / 100 : null);
+            },
+            child: const Text("Set"),
           ),
         ],
       ),
     );
+
+    if (confirmed != null) {
+      state.setVoiceParticipantVolume(userId, confirmed.clamp(0.0, 5.0));
+    }
   }
 
   @override

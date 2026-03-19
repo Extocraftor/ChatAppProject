@@ -183,12 +183,12 @@ class AppState extends ChangeNotifier {
 
   double voiceParticipantVolumeFor(int userId) {
     return (_voiceParticipantVolumes[userId] ?? 1.0)
-        .clamp(0.0, 1.0)
+        .clamp(0.0, 2.0)
         .toDouble();
   }
 
   void setVoiceParticipantVolume(int userId, double volume) {
-    final normalized = volume.clamp(0.0, 1.0).toDouble();
+    final normalized = volume.clamp(0.0, 2.0);
     final previous = voiceParticipantVolumeFor(userId);
     if ((previous - normalized).abs() < 0.001) {
       return;
