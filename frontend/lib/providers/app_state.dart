@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -55,6 +56,35 @@ class AppState extends ChangeNotifier {
   int? _lastStatsBytesSent;
   int? _lastStatsPacketsSent;
   DateTime? _lastStatsSnapshotAt;
+  final List<MediaDeviceInfo> _audioInputDevices = [];
+  String? _selectedAudioInputDeviceId;
+  bool _audioInputDevicesLoading = false;
+  bool _audioInputSwitching = false;
+  RTCPeerConnection? _micProbeConnection;
+  RTCRtpSender? _micProbeRtpSender;
+  MediaStreamTrack? _micProbeTrack;
+  double? _lastMicEnergy;
+  double? _lastMicDuration;
+  bool _isInputTestRunning = false;
+  bool _isInputTestStarting = false;
+  bool _inputTestUsesVoiceStream = false;
+  String? _inputTestError;
+  double _inputTestLevel = 0;
+  MediaStream? _inputTestStream;
+  RTCPeerConnection? _inputTestProbeConnection;
+  RTCRtpSender? _inputTestProbeRtpSender;
+  MediaStreamTrack? _inputTestProbeTrack;
+  Timer? _inputTestTimer;
+  double? _inputTestLastEnergy;
+  double? _inputTestLastDuration;
+  double? _inputTestRawAudioLevel;
+  double? _inputTestRawEnergy;
+  double? _inputTestRawDuration;
+  double? _inputTestRawEstimatedLevel;
+  bool _inputTestRawVoiceActivity = false;
+  String _inputTestLevelSource = "none";
+  DateTime? _inputTestLastSampleAt;
+  final Map<String, String> _inputTestRawStats = {};
 
   // Interaction state
   Message? replyingTo;
@@ -97,6 +127,25 @@ class AppState extends ChangeNotifier {
       _localStream?.getAudioTracks().isNotEmpty == true;
   bool get isLocalMicTrackEnabled =>
       _localStream?.getAudioTracks().any((track) => track.enabled) == true;
+  List<MediaDeviceInfo> get audioInputDevices =>
+      List<MediaDeviceInfo>.unmodifiable(_audioInputDevices);
+  String? get selectedAudioInputDeviceId => _selectedAudioInputDeviceId;
+  bool get isAudioInputDevicesLoading => _audioInputDevicesLoading;
+  bool get isAudioInputSwitching => _audioInputSwitching;
+  bool get isInputTestRunning => _isInputTestRunning;
+  bool get isInputTestStarting => _isInputTestStarting;
+  bool get inputTestUsesVoiceStream => _inputTestUsesVoiceStream;
+  String? get inputTestError => _inputTestError;
+  double get inputTestLevel => _inputTestLevel;
+  double? get inputTestRawAudioLevel => _inputTestRawAudioLevel;
+  double? get inputTestRawEnergy => _inputTestRawEnergy;
+  double? get inputTestRawDuration => _inputTestRawDuration;
+  double? get inputTestRawEstimatedLevel => _inputTestRawEstimatedLevel;
+  bool get inputTestRawVoiceActivity => _inputTestRawVoiceActivity;
+  String get inputTestLevelSource => _inputTestLevelSource;
+  DateTime? get inputTestLastSampleAt => _inputTestLastSampleAt;
+  Map<String, String> get inputTestRawStats =>
+      Map<String, String>.unmodifiable(_inputTestRawStats);
 
   Future<String?> register(String username, String password) async {
     try {
@@ -133,6 +182,7 @@ class AppState extends ChangeNotifier {
         currentUser = User.fromJson(jsonDecode(response.body));
         await fetchChannels();
         await fetchVoiceChannels();
+        await refreshAudioInputDevices(notify: false);
         notifyListeners();
         return null;
       }
@@ -212,6 +262,331 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshAudioInputDevices({bool notify = true}) async {
+    if (_audioInputDevicesLoading) {
+      return;
+    }
+
+    _audioInputDevicesLoading = true;
+    if (notify) {
+      notifyListeners();
+    }
+
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      final seen = <String>{};
+      final inputs = devices.where((device) {
+        if (device.kind != 'audioinput') {
+          return false;
+        }
+
+        final id = device.deviceId;
+        if (id.isEmpty || seen.contains(id)) {
+          return false;
+        }
+        seen.add(id);
+        return true;
+      }).toList();
+
+      _audioInputDevices
+        ..clear()
+        ..addAll(inputs);
+
+      final selectedExists = _selectedAudioInputDeviceId != null &&
+          _audioInputDevices.any(
+            (device) => device.deviceId == _selectedAudioInputDeviceId,
+          );
+      if (!selectedExists) {
+        _selectedAudioInputDeviceId = _audioInputDevices.isNotEmpty
+            ? _audioInputDevices.first.deviceId
+            : null;
+      }
+    } catch (_) {
+      // Ignore device enumeration failures.
+    } finally {
+      _audioInputDevicesLoading = false;
+      if (notify) {
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> selectAudioInputDevice(String deviceId) async {
+    if (deviceId == _selectedAudioInputDeviceId ||
+        _audioInputSwitching ||
+        _voiceJoinInProgress) {
+      return;
+    }
+
+    _audioInputSwitching = true;
+    _selectedAudioInputDeviceId = deviceId;
+    notifyListeners();
+
+    try {
+      await _applyAudioInputPreference(deviceId);
+      final currentChannel = activeVoiceChannel;
+      if (currentChannel != null) {
+        final joined =
+            await joinVoiceChannel(currentChannel, forceRejoin: true);
+        if (!joined && voiceError == null) {
+          voiceError = "Unable to switch microphone input";
+          notifyListeners();
+        }
+      }
+      if (_isInputTestRunning) {
+        await startInputTest(forceRestart: true);
+      }
+      await refreshAudioInputDevices(notify: false);
+    } catch (error) {
+      voiceError = "Unable to switch microphone input: $error";
+      notifyListeners();
+    } finally {
+      _audioInputSwitching = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> startInputTest({bool forceRestart = false}) async {
+    if (_isInputTestStarting) {
+      return;
+    }
+    if (_isInputTestRunning && !forceRestart) {
+      return;
+    }
+
+    _isInputTestStarting = true;
+    _inputTestError = null;
+    notifyListeners();
+
+    try {
+      await stopInputTest(notify: false);
+
+      MediaStream? testStream;
+      MediaStreamTrack? testTrack;
+      bool usesVoiceStream = false;
+
+      if (_localStream != null && activeVoiceChannel != null) {
+        final voiceTracks = _localStream!.getAudioTracks();
+        if (voiceTracks.isNotEmpty) {
+          usesVoiceStream = true;
+          testTrack = voiceTracks.first;
+        }
+      }
+
+      if (testTrack == null) {
+        await refreshAudioInputDevices(notify: false);
+
+        final selectedInputId = _selectedAudioInputDeviceId;
+        if (selectedInputId != null && selectedInputId.isNotEmpty) {
+          await _applyAudioInputPreference(selectedInputId);
+        }
+
+        testStream = await navigator.mediaDevices.getUserMedia({
+          'audio': _buildVoiceAudioConstraints(),
+          'video': false,
+        });
+        final testTracks = testStream.getAudioTracks();
+        if (testTracks.isEmpty) {
+          throw Exception("No audio track returned by microphone");
+        }
+        testTrack = testTracks.first;
+      }
+
+      final probeConnection = await createPeerConnection(_rtcConfiguration);
+      final probeSender = await probeConnection.addTrack(
+        testTrack,
+        usesVoiceStream ? _localStream! : testStream!,
+      );
+      final offer = await probeConnection.createOffer({
+        'offerToReceiveAudio': false,
+        'offerToReceiveVideo': false,
+      });
+      await probeConnection.setLocalDescription(offer);
+
+      _inputTestStream = testStream;
+      _inputTestProbeTrack = testTrack;
+      _inputTestProbeConnection = probeConnection;
+      _inputTestProbeRtpSender = probeSender;
+      _inputTestUsesVoiceStream = usesVoiceStream;
+      _isInputTestRunning = true;
+      _inputTestLevel = 0;
+      _inputTestLastEnergy = null;
+      _inputTestLastDuration = null;
+      _inputTestRawAudioLevel = null;
+      _inputTestRawEnergy = null;
+      _inputTestRawDuration = null;
+      _inputTestRawEstimatedLevel = null;
+      _inputTestRawVoiceActivity = false;
+      _inputTestLevelSource = "none";
+      _inputTestLastSampleAt = null;
+      _inputTestRawStats.clear();
+
+      _inputTestTimer?.cancel();
+      _inputTestTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        unawaited(_sampleInputTestLevel());
+      });
+      unawaited(_sampleInputTestLevel());
+    } catch (error) {
+      _inputTestError = "Unable to start mic test: $error";
+      await stopInputTest(notify: false);
+    } finally {
+      _isInputTestStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> stopInputTest({bool notify = true}) async {
+    _inputTestTimer?.cancel();
+    _inputTestTimer = null;
+
+    final probeSender = _inputTestProbeRtpSender;
+    final probeConnection = _inputTestProbeConnection;
+    final testStream = _inputTestStream;
+
+    _inputTestProbeRtpSender = null;
+    _inputTestProbeConnection = null;
+    _inputTestProbeTrack = null;
+    _inputTestStream = null;
+    _isInputTestRunning = false;
+    _inputTestUsesVoiceStream = false;
+    _inputTestLevel = 0;
+    _inputTestLastEnergy = null;
+    _inputTestLastDuration = null;
+    _inputTestRawAudioLevel = null;
+    _inputTestRawEnergy = null;
+    _inputTestRawDuration = null;
+    _inputTestRawEstimatedLevel = null;
+    _inputTestRawVoiceActivity = false;
+    _inputTestLevelSource = "none";
+    _inputTestLastSampleAt = null;
+    _inputTestRawStats.clear();
+
+    if (probeSender != null) {
+      try {
+        await probeSender.dispose();
+      } catch (_) {
+        // Ignore sender disposal failures during teardown.
+      }
+    }
+
+    if (probeConnection != null) {
+      probeConnection.onIceCandidate = null;
+      probeConnection.onTrack = null;
+      probeConnection.onConnectionState = null;
+      await _closePeerConnectionSafely(probeConnection);
+    }
+
+    if (testStream != null) {
+      await _disposeStreamSafely(testStream);
+    }
+
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _sampleInputTestLevel() async {
+    if (!_isInputTestRunning) {
+      return;
+    }
+
+    final probeConnection = _inputTestProbeConnection;
+    final probeTrack = _inputTestProbeTrack;
+    if (probeConnection == null || probeTrack == null) {
+      return;
+    }
+
+    double? strongestAudioLevel;
+    double? totalAudioEnergy;
+    double? totalSamplesDuration;
+    bool voiceActivity = false;
+    final rawStats = <String, String>{
+      'track_id': probeTrack.id.toString(),
+      'track_kind': probeTrack.kind.toString(),
+      'track_enabled': probeTrack.enabled.toString(),
+    };
+
+    try {
+      final reports = await probeConnection.getStats();
+      final sample = _extractMicDiagnosticsFromStats(reports);
+      strongestAudioLevel = sample.audioLevel;
+      totalAudioEnergy = sample.totalAudioEnergy;
+      totalSamplesDuration = sample.totalSamplesDuration;
+      voiceActivity = sample.voiceActivity;
+      rawStats.addAll(_summarizeStatsReports(reports, prefix: 'pc'));
+    } catch (error) {
+      rawStats['pc_error'] = error.toString();
+    }
+
+    final probeSender = _inputTestProbeRtpSender;
+    if (probeSender != null) {
+      try {
+        final reports = await probeSender.getStats();
+        final sample = _extractMicDiagnosticsFromStats(reports);
+        if (sample.audioLevel != null &&
+            (strongestAudioLevel == null ||
+                sample.audioLevel! > strongestAudioLevel)) {
+          strongestAudioLevel = sample.audioLevel;
+        }
+        voiceActivity = voiceActivity || sample.voiceActivity;
+        if (sample.totalAudioEnergy != null &&
+            sample.totalSamplesDuration != null &&
+            (totalSamplesDuration == null ||
+                sample.totalSamplesDuration! > totalSamplesDuration)) {
+          totalAudioEnergy = sample.totalAudioEnergy;
+          totalSamplesDuration = sample.totalSamplesDuration;
+        }
+        rawStats.addAll(_summarizeStatsReports(reports, prefix: 'sender'));
+      } catch (_) {
+        rawStats['sender_error'] = 'failed to read sender stats';
+      }
+    }
+
+    final estimatedLevel = _estimateInputTestLevelFromEnergy(
+      totalAudioEnergy,
+      totalSamplesDuration,
+    );
+
+    final testTrackEnabled = probeTrack.enabled;
+    double targetLevel = 0;
+    String levelSource = "none";
+    if (testTrackEnabled) {
+      if (strongestAudioLevel != null) {
+        targetLevel = strongestAudioLevel.clamp(0.0, 1.0).toDouble();
+        levelSource = "audio_level";
+      } else if (estimatedLevel != null) {
+        targetLevel = estimatedLevel;
+        levelSource = "energy";
+      } else if (voiceActivity) {
+        targetLevel = 0.35;
+        levelSource = "voice_activity";
+      } else {
+        targetLevel = 0.04;
+        levelSource = "track_present";
+      }
+    }
+
+    final smoothed = (_inputTestLevel * 0.65 + targetLevel * 0.35)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    _inputTestRawAudioLevel = strongestAudioLevel;
+    _inputTestRawEnergy = totalAudioEnergy;
+    _inputTestRawDuration = totalSamplesDuration;
+    _inputTestRawEstimatedLevel = estimatedLevel;
+    _inputTestRawVoiceActivity = voiceActivity;
+    _inputTestLevelSource = levelSource;
+    _inputTestLastSampleAt = DateTime.now();
+    _inputTestRawStats
+      ..clear()
+      ..addAll(rawStats);
+
+    if ((_inputTestLevel - smoothed).abs() > 0.002 ||
+        (_inputTestLevel == 0 && smoothed > 0)) {
+      _inputTestLevel = smoothed;
+    }
+    notifyListeners();
+  }
+
   Future<void> fetchMessages(int channelId) async {
     final response =
         await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
@@ -261,7 +636,10 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<bool> joinVoiceChannel(VoiceChannel channel) async {
+  Future<bool> joinVoiceChannel(
+    VoiceChannel channel, {
+    bool forceRejoin = false,
+  }) async {
     if (currentUser == null) {
       return false;
     }
@@ -270,7 +648,9 @@ class AppState extends ChangeNotifier {
       return false;
     }
 
-    if (activeVoiceChannel?.id == channel.id && _voiceSignalChannel != null) {
+    if (!forceRejoin &&
+        activeVoiceChannel?.id == channel.id &&
+        _voiceSignalChannel != null) {
       return true;
     }
 
@@ -281,12 +661,25 @@ class AppState extends ChangeNotifier {
     voiceError = null;
     notifyListeners();
 
-    var failedStep = 'getUserMedia';
+    var failedStep = 'enumerate input devices';
     try {
+      await refreshAudioInputDevices(notify: false);
+
+      final selectedInputId = _selectedAudioInputDeviceId;
+      if (selectedInputId != null && selectedInputId.isNotEmpty) {
+        failedStep = 'apply audio input preference';
+        await _applyAudioInputPreference(selectedInputId);
+      }
+
+      failedStep = 'getUserMedia';
       _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
+        'audio': _buildVoiceAudioConstraints(),
         'video': false,
       });
+
+      failedStep = 'set up mic diagnostics';
+      await _startMicProbe();
+      await refreshAudioInputDevices(notify: false);
 
       failedStep = 'signal connection';
       activeVoiceChannel = channel;
@@ -595,6 +988,88 @@ class AppState extends ChangeNotifier {
     signalChannel.sink.add(jsonEncode(payload));
   }
 
+  Map<String, dynamic> _buildVoiceAudioConstraints() {
+    final constraints = <String, dynamic>{
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      'autoGainControl': true,
+    };
+
+    final selectedInputId = _selectedAudioInputDeviceId;
+    if (selectedInputId != null && selectedInputId.isNotEmpty) {
+      if (kIsWeb) {
+        constraints['deviceId'] = {'exact': selectedInputId};
+      } else {
+        constraints['deviceId'] = selectedInputId;
+        constraints['optional'] = [
+          {'sourceId': selectedInputId},
+        ];
+      }
+    }
+
+    return constraints;
+  }
+
+  Future<void> _applyAudioInputPreference(String deviceId) async {
+    try {
+      await Helper.selectAudioInput(deviceId);
+    } catch (_) {
+      // Not all platforms expose native input switching.
+    }
+  }
+
+  Future<void> _startMicProbe() async {
+    await _stopMicProbe();
+
+    final localStream = _localStream;
+    final audioTracks = localStream?.getAudioTracks() ?? <MediaStreamTrack>[];
+    if (localStream == null || audioTracks.isEmpty) {
+      return;
+    }
+    final localTrack = audioTracks.first;
+
+    try {
+      final probeConnection = await createPeerConnection(_rtcConfiguration);
+      _micProbeConnection = probeConnection;
+      _micProbeRtpSender =
+          await probeConnection.addTrack(localTrack, localStream);
+      _micProbeTrack = localTrack;
+
+      final offer = await probeConnection.createOffer({
+        'offerToReceiveAudio': false,
+        'offerToReceiveVideo': false,
+      });
+      await probeConnection.setLocalDescription(offer);
+    } catch (error, stackTrace) {
+      debugPrint('Mic probe initialization failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      await _stopMicProbe();
+    }
+  }
+
+  Future<void> _stopMicProbe() async {
+    final probeConnection = _micProbeConnection;
+    final probeRtpSender = _micProbeRtpSender;
+    _micProbeConnection = null;
+    _micProbeRtpSender = null;
+    _micProbeTrack = null;
+
+    if (probeRtpSender != null) {
+      try {
+        await probeRtpSender.dispose();
+      } catch (_) {
+        // Ignore sender disposal failures during teardown.
+      }
+    }
+
+    if (probeConnection != null) {
+      probeConnection.onIceCandidate = null;
+      probeConnection.onTrack = null;
+      probeConnection.onConnectionState = null;
+      await _closePeerConnectionSafely(probeConnection);
+    }
+  }
+
   void toggleMute() {
     final stream = _localStream;
     if (stream == null || currentUser == null) {
@@ -668,7 +1143,11 @@ class AppState extends ChangeNotifier {
     activeVoiceChannel = null;
     isSelfMuted = false;
     _voiceConnectedAt = null;
+    if (_inputTestUsesVoiceStream) {
+      await stopInputTest(notify: false);
+    }
     _resetVoiceDiagnostics();
+    await _stopMicProbe();
 
     if (signalChannel != null) {
       await signalChannel.sink.close();
@@ -843,9 +1322,53 @@ class AppState extends ChangeNotifier {
 
       double? strongestAudioLevel;
       bool voiceActivity = false;
+      double? probeTotalAudioEnergy;
+      double? probeTotalSamplesDuration;
       int totalBytesSent = 0;
       int totalPacketsSent = 0;
       int? peerRttMs;
+
+      final probeConnection = _micProbeConnection;
+      final probeTrack = _micProbeTrack;
+      if (probeConnection != null && probeTrack != null) {
+        try {
+          final probeReports = await probeConnection.getStats();
+          final probeSample = _extractMicDiagnosticsFromStats(probeReports);
+          if (probeSample.audioLevel != null) {
+            strongestAudioLevel = probeSample.audioLevel;
+          }
+          voiceActivity = voiceActivity || probeSample.voiceActivity;
+          if (probeSample.totalAudioEnergy != null &&
+              probeSample.totalSamplesDuration != null) {
+            probeTotalAudioEnergy = probeSample.totalAudioEnergy;
+            probeTotalSamplesDuration = probeSample.totalSamplesDuration;
+          }
+        } catch (_) {
+          // Ignore probe stats failures and fall back to peer stats.
+        }
+      }
+
+      final probeRtpSender = _micProbeRtpSender;
+      if (probeRtpSender != null) {
+        try {
+          final probeReports = await probeRtpSender.getStats();
+          final probeSample = _extractMicDiagnosticsFromStats(probeReports);
+          if (probeSample.audioLevel != null) {
+            strongestAudioLevel = probeSample.audioLevel;
+          }
+          voiceActivity = voiceActivity || probeSample.voiceActivity;
+          if (probeSample.totalAudioEnergy != null &&
+              probeSample.totalSamplesDuration != null &&
+              (probeTotalSamplesDuration == null ||
+                  probeSample.totalSamplesDuration! >
+                      probeTotalSamplesDuration)) {
+            probeTotalAudioEnergy = probeSample.totalAudioEnergy;
+            probeTotalSamplesDuration = probeSample.totalSamplesDuration;
+          }
+        } catch (_) {
+          // Ignore probe stats failures and fall back to peer stats.
+        }
+      }
 
       for (final peerConnection in _peerConnections.values) {
         List<StatsReport> reports;
@@ -854,6 +1377,14 @@ class AppState extends ChangeNotifier {
         } catch (_) {
           continue;
         }
+
+        final micSample = _extractMicDiagnosticsFromStats(reports);
+        if (micSample.audioLevel != null &&
+            (strongestAudioLevel == null ||
+                micSample.audioLevel! > strongestAudioLevel)) {
+          strongestAudioLevel = micSample.audioLevel;
+        }
+        voiceActivity = voiceActivity || micSample.voiceActivity;
 
         for (final report in reports) {
           final values = report.values;
@@ -867,27 +1398,6 @@ class AppState extends ChangeNotifier {
           final isAudio = kind == 'audio' ||
               ((values['id']?.toString().toLowerCase().contains('audio')) ??
                   false);
-
-          final audioLevel = _parseDoubleMetric(
-            values['audioLevel'] ?? values['audio_level'],
-          );
-          if (audioLevel != null &&
-              (reportType == 'media-source' ||
-                  reportType == 'track' ||
-                  reportType == 'outbound-rtp' ||
-                  isAudio)) {
-            if (strongestAudioLevel == null ||
-                audioLevel > strongestAudioLevel) {
-              strongestAudioLevel = audioLevel;
-            }
-          }
-
-          final voiceActivityFlag =
-              values['voiceActivityFlag'] ?? values['voice_activity_flag'];
-          if (voiceActivityFlag == true ||
-              voiceActivityFlag.toString().toLowerCase() == 'true') {
-            voiceActivity = true;
-          }
 
           if (reportType == 'outbound-rtp' && isAudio) {
             totalBytesSent +=
@@ -918,15 +1428,31 @@ class AppState extends ChangeNotifier {
         }
       }
 
+      final energyEstimatedMicLevel = _estimateMicLevelFromEnergy(
+        probeTotalAudioEnergy,
+        probeTotalSamplesDuration,
+      );
+      if (energyEstimatedMicLevel != null &&
+          (strongestAudioLevel == null ||
+              energyEstimatedMicLevel > strongestAudioLevel)) {
+        strongestAudioLevel = energyEstimatedMicLevel;
+      }
+      if (energyEstimatedMicLevel != null && energyEstimatedMicLevel > 0.03) {
+        voiceActivity = true;
+      }
+
       double targetMicLevel = 0;
       if (localMicEnabled && !isSelfMuted) {
         if (strongestAudioLevel != null) {
           targetMicLevel = strongestAudioLevel.clamp(0, 1).toDouble();
         } else if (voiceActivity) {
-          targetMicLevel = 0.65;
+          targetMicLevel = 0.45;
         } else if (_lastStatsPacketsSent != null &&
             totalPacketsSent > _lastStatsPacketsSent!) {
           targetMicLevel = 0.35;
+        } else {
+          // Keep a tiny baseline so users can tell the input track exists.
+          targetMicLevel = 0.02;
         }
       }
 
@@ -981,6 +1507,249 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  _MicDiagnosticsSample _extractMicDiagnosticsFromStats(
+      List<StatsReport> reports) {
+    double? audioLevel;
+    bool voiceActivity = false;
+    double? totalAudioEnergy;
+    double? totalSamplesDuration;
+
+    for (final report in reports) {
+      final values = report.values;
+      final reportType =
+          (_readStringMetric(values, ['type']) ?? report.type).toLowerCase();
+      final kind = _readStringMetric(
+        values,
+        ['kind', 'mediaType', 'media_type'],
+      )?.toLowerCase();
+      final likelyAudioReportType = reportType == 'outbound-rtp' ||
+          reportType == 'inbound-rtp' ||
+          reportType == 'remote-inbound-rtp' ||
+          reportType == 'remote-outbound-rtp' ||
+          reportType == 'media-source' ||
+          reportType == 'track';
+      final isAudio = kind == 'audio' ||
+          likelyAudioReportType ||
+          reportType.contains('audio') ||
+          ((values['id']?.toString().toLowerCase().contains('audio')) ?? false);
+      if (!isAudio && reportType != 'media-source' && reportType != 'track') {
+        continue;
+      }
+
+      final currentAudioLevel = _parseDoubleMetric(
+        values['audioLevel'] ??
+            values['audio_level'] ??
+            values['audioInputLevel'] ??
+            values['audio_input_level'] ??
+            values['inputLevel'] ??
+            values['input_level'],
+      );
+      if (currentAudioLevel != null &&
+          (audioLevel == null || currentAudioLevel > audioLevel)) {
+        audioLevel = currentAudioLevel;
+      }
+
+      final voiceActivityFlag =
+          values['voiceActivityFlag'] ?? values['voice_activity_flag'];
+      if (voiceActivityFlag == true ||
+          voiceActivityFlag.toString().toLowerCase() == 'true') {
+        voiceActivity = true;
+      }
+
+      final energy = _parseDoubleMetric(
+        values['totalAudioEnergy'] ?? values['total_audio_energy'],
+      );
+      final duration = _parseDoubleMetric(
+        values['totalSamplesDuration'] ?? values['total_samples_duration'],
+      );
+      if (energy != null &&
+          duration != null &&
+          (totalSamplesDuration == null || duration > totalSamplesDuration)) {
+        totalAudioEnergy = energy;
+        totalSamplesDuration = duration;
+      }
+    }
+
+    return _MicDiagnosticsSample(
+      audioLevel: audioLevel,
+      voiceActivity: voiceActivity,
+      totalAudioEnergy: totalAudioEnergy,
+      totalSamplesDuration: totalSamplesDuration,
+    );
+  }
+
+  Map<String, String> _summarizeStatsReports(
+    List<StatsReport> reports, {
+    required String prefix,
+  }) {
+    int audioRelatedReports = 0;
+    int reportsWithAudioLevel = 0;
+    double? maxAudioLevel;
+    double? latestEnergy;
+    double? latestDuration;
+    bool voiceActivitySeen = false;
+    String? firstAudioType;
+    String? firstAudioId;
+    final interestingKeys = <String>{};
+
+    for (final report in reports) {
+      final values = report.values;
+      final reportType =
+          (_readStringMetric(values, ['type']) ?? report.type).toLowerCase();
+      final kind = _readStringMetric(
+        values,
+        ['kind', 'mediaType', 'media_type'],
+      )?.toLowerCase();
+      final likelyAudioReportType = reportType == 'outbound-rtp' ||
+          reportType == 'inbound-rtp' ||
+          reportType == 'remote-inbound-rtp' ||
+          reportType == 'remote-outbound-rtp' ||
+          reportType == 'media-source' ||
+          reportType == 'track';
+      final isAudio = kind == 'audio' ||
+          likelyAudioReportType ||
+          reportType.contains('audio') ||
+          ((values['id']?.toString().toLowerCase().contains('audio')) ?? false);
+      if (!isAudio) {
+        continue;
+      }
+
+      audioRelatedReports += 1;
+      firstAudioType ??= reportType;
+      firstAudioId ??= report.id;
+
+      for (final key in values.keys) {
+        final keyText = key.toString();
+        final lowerKey = keyText.toLowerCase();
+        if (lowerKey.contains('audio') ||
+            lowerKey.contains('level') ||
+            lowerKey.contains('energy') ||
+            lowerKey.contains('sample') ||
+            lowerKey.contains('voice')) {
+          interestingKeys.add(keyText);
+        }
+      }
+
+      final audioLevel = _parseDoubleMetric(
+        values['audioLevel'] ??
+            values['audio_level'] ??
+            values['audioInputLevel'] ??
+            values['audio_input_level'] ??
+            values['inputLevel'] ??
+            values['input_level'],
+      );
+      if (audioLevel != null) {
+        reportsWithAudioLevel += 1;
+        if (maxAudioLevel == null || audioLevel > maxAudioLevel) {
+          maxAudioLevel = audioLevel;
+        }
+      }
+
+      final energy = _parseDoubleMetric(
+        values['totalAudioEnergy'] ?? values['total_audio_energy'],
+      );
+      final duration = _parseDoubleMetric(
+        values['totalSamplesDuration'] ?? values['total_samples_duration'],
+      );
+      if (energy != null) {
+        latestEnergy = energy;
+      }
+      if (duration != null) {
+        latestDuration = duration;
+      }
+
+      final voiceFlag =
+          values['voiceActivityFlag'] ?? values['voice_activity_flag'];
+      if (voiceFlag == true || voiceFlag.toString().toLowerCase() == 'true') {
+        voiceActivitySeen = true;
+      }
+    }
+
+    return {
+      '${prefix}_reports_total': reports.length.toString(),
+      '${prefix}_reports_audio_related': audioRelatedReports.toString(),
+      '${prefix}_reports_with_audio_level': reportsWithAudioLevel.toString(),
+      if (firstAudioType != null) '${prefix}_first_audio_type': firstAudioType,
+      if (firstAudioId != null) '${prefix}_first_audio_id': firstAudioId,
+      if (maxAudioLevel != null)
+        '${prefix}_max_audio_level': maxAudioLevel.toStringAsFixed(5),
+      if (latestEnergy != null)
+        '${prefix}_latest_total_audio_energy': latestEnergy.toStringAsFixed(5),
+      if (latestDuration != null)
+        '${prefix}_latest_total_samples_duration':
+            latestDuration.toStringAsFixed(5),
+      '${prefix}_voice_activity': voiceActivitySeen.toString(),
+      if (interestingKeys.isNotEmpty)
+        '${prefix}_interesting_keys': interestingKeys.take(16).join(', '),
+    };
+  }
+
+  double? _estimateMicLevelFromEnergy(
+    double? totalAudioEnergy,
+    double? totalSamplesDuration,
+  ) {
+    if (totalAudioEnergy == null || totalSamplesDuration == null) {
+      _lastMicEnergy = null;
+      _lastMicDuration = null;
+      return null;
+    }
+
+    final previousEnergy = _lastMicEnergy;
+    final previousDuration = _lastMicDuration;
+    _lastMicEnergy = totalAudioEnergy;
+    _lastMicDuration = totalSamplesDuration;
+
+    if (previousEnergy == null || previousDuration == null) {
+      return null;
+    }
+
+    final energyDelta = totalAudioEnergy - previousEnergy;
+    final durationDelta = totalSamplesDuration - previousDuration;
+    if (durationDelta <= 0 || energyDelta < 0) {
+      return null;
+    }
+
+    final averagePower = energyDelta / durationDelta;
+    if (!averagePower.isFinite) {
+      return null;
+    }
+
+    return (averagePower * 6).clamp(0.0, 1.0).toDouble();
+  }
+
+  double? _estimateInputTestLevelFromEnergy(
+    double? totalAudioEnergy,
+    double? totalSamplesDuration,
+  ) {
+    if (totalAudioEnergy == null || totalSamplesDuration == null) {
+      _inputTestLastEnergy = null;
+      _inputTestLastDuration = null;
+      return null;
+    }
+
+    final previousEnergy = _inputTestLastEnergy;
+    final previousDuration = _inputTestLastDuration;
+    _inputTestLastEnergy = totalAudioEnergy;
+    _inputTestLastDuration = totalSamplesDuration;
+
+    if (previousEnergy == null || previousDuration == null) {
+      return null;
+    }
+
+    final energyDelta = totalAudioEnergy - previousEnergy;
+    final durationDelta = totalSamplesDuration - previousDuration;
+    if (durationDelta <= 0 || energyDelta < 0) {
+      return null;
+    }
+
+    final averagePower = energyDelta / durationDelta;
+    if (!averagePower.isFinite) {
+      return null;
+    }
+
+    return (averagePower * 6).clamp(0.0, 1.0).toDouble();
+  }
+
   void _resetVoiceDiagnostics() {
     _pendingVoicePings.clear();
     _voicePingSequence = 0;
@@ -992,6 +1761,8 @@ class AppState extends ChangeNotifier {
     _lastStatsBytesSent = null;
     _lastStatsPacketsSent = null;
     _lastStatsSnapshotAt = null;
+    _lastMicEnergy = null;
+    _lastMicDuration = null;
   }
 
   String? _readStringMetric(Map<dynamic, dynamic> values, List<String> keys) {
@@ -1129,6 +1900,10 @@ class AppState extends ChangeNotifier {
     _voicePingTimer = null;
     _voiceDiagnosticsTimer?.cancel();
     _voiceDiagnosticsTimer = null;
+    _inputTestTimer?.cancel();
+    _inputTestTimer = null;
+    unawaited(_stopMicProbe());
+    unawaited(stopInputTest(notify: false));
 
     for (final peerConnection in _peerConnections.values) {
       peerConnection.onIceCandidate = null;
@@ -1155,4 +1930,18 @@ class AppState extends ChangeNotifier {
     _highlightTimer?.cancel();
     super.dispose();
   }
+}
+
+class _MicDiagnosticsSample {
+  const _MicDiagnosticsSample({
+    this.audioLevel,
+    required this.voiceActivity,
+    this.totalAudioEnergy,
+    this.totalSamplesDuration,
+  });
+
+  final double? audioLevel;
+  final bool voiceActivity;
+  final double? totalAudioEnergy;
+  final double? totalSamplesDuration;
 }

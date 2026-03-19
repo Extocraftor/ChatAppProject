@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
+import '../screens/input_test_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
 
 class Sidebar extends StatelessWidget {
@@ -357,7 +358,17 @@ class Sidebar extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const Icon(Icons.settings, color: Colors.grey),
+                IconButton(
+                  icon: const Icon(Icons.settings, color: Colors.grey),
+                  tooltip: "Audio settings",
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const InputTestScreen(),
+                      ),
+                    );
+                  },
+                ),
               ],
             ),
           ),
