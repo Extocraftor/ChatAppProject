@@ -1,11 +1,16 @@
 class User {
   final int id;
   final String username;
+  final String role;
 
-  User({required this.id, required this.username});
+  User({required this.id, required this.username, required this.role});
 
   factory User.fromJson(Map<String, dynamic> json) {
-    return User(id: json['id'], username: json['username']);
+    return User(
+      id: json['id'],
+      username: json['username'],
+      role: json['role'] ?? "member",
+    );
   }
 }
 
@@ -13,11 +18,22 @@ class Channel {
   final int id;
   final String name;
   final String? description;
+  final int? creatorUserId;
 
-  Channel({required this.id, required this.name, this.description});
+  Channel({
+    required this.id,
+    required this.name,
+    this.description,
+    this.creatorUserId,
+  });
 
   factory Channel.fromJson(Map<String, dynamic> json) {
-    return Channel(id: json['id'], name: json['name'], description: json['description']);
+    return Channel(
+      id: json['id'],
+      name: json['name'],
+      description: json['description'],
+      creatorUserId: json['creator_user_id'],
+    );
   }
 }
 
@@ -25,14 +41,21 @@ class VoiceChannel {
   final int id;
   final String name;
   final String? description;
+  final int? creatorUserId;
 
-  VoiceChannel({required this.id, required this.name, this.description});
+  VoiceChannel({
+    required this.id,
+    required this.name,
+    this.description,
+    this.creatorUserId,
+  });
 
   factory VoiceChannel.fromJson(Map<String, dynamic> json) {
     return VoiceChannel(
       id: json['id'],
       name: json['name'],
       description: json['description'],
+      creatorUserId: json['creator_user_id'],
     );
   }
 }

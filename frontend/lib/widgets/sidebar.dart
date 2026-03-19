@@ -163,6 +163,84 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
+  Future<void> _showDeleteTextChannelDialog(
+    BuildContext context,
+    AppState state,
+    Channel channel,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF2F3136),
+        title: const Text("Delete Text Channel"),
+        content: Text(
+          "Delete #${channel.name}? This will permanently remove all messages in this channel.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    final success = await state.deleteChannel(channel.id);
+    if (!success && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Unable to delete text channel")),
+      );
+    }
+  }
+
+  Future<void> _showDeleteVoiceChannelDialog(
+    BuildContext context,
+    AppState state,
+    VoiceChannel channel,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF2F3136),
+        title: const Text("Delete Voice Channel"),
+        content: Text(
+          "Delete ${channel.name}? This disconnects everyone currently in the channel.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text("Delete"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    final success = await state.deleteVoiceChannel(channel.id);
+    if (!success && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Unable to delete voice channel")),
+      );
+    }
+  }
+
   Widget _voiceParticipantTile(
     BuildContext context,
     AppState state,
@@ -291,6 +369,7 @@ class _SidebarState extends State<Sidebar> {
                 ),
                 ...state.channels.map((channel) {
                   final isActive = state.activeChannel?.id == channel.id;
+                  final canDeleteChannel = state.canDeleteTextChannel(channel);
                   return ListTile(
                     dense: true,
                     leading: const Text("#",
@@ -303,6 +382,18 @@ class _SidebarState extends State<Sidebar> {
                     onTap: () => state.selectChannel(channel),
                     selected: isActive,
                     selectedTileColor: const Color(0xFF40444B),
+                    trailing: canDeleteChannel
+                        ? IconButton(
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              size: 18,
+                              color: Colors.redAccent,
+                            ),
+                            tooltip: "Delete channel",
+                            onPressed: () =>
+                                _showDeleteTextChannelDialog(context, state, channel),
+                          )
+                        : null,
                   );
                 }),
                 const SizedBox(height: 10),
@@ -314,6 +405,7 @@ class _SidebarState extends State<Sidebar> {
                 ),
                 ...state.voiceChannels.map((channel) {
                   final isActive = state.activeVoiceChannel?.id == channel.id;
+                  final canDeleteChannel = state.canDeleteVoiceChannel(channel);
                   final participants =
                       isActive ? state.voiceParticipants.values.toList() : <VoiceParticipant>[];
                   if (isActive) {
@@ -328,6 +420,56 @@ class _SidebarState extends State<Sidebar> {
                             b.username.toLowerCase(),
                           );
                     });
+                  }
+
+                  Widget? trailing;
+                  if (isActive) {
+                    trailing = SizedBox(
+                      width: canDeleteChannel ? 56 : 28,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (canDeleteChannel)
+                            IconButton(
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                color: Colors.redAccent,
+                                size: 18,
+                              ),
+                              tooltip: "Delete channel",
+                              onPressed: () => _showDeleteVoiceChannelDialog(
+                                context,
+                                state,
+                                channel,
+                              ),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                            ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.call_end,
+                              color: Colors.redAccent,
+                              size: 18,
+                            ),
+                            tooltip: "Leave voice channel",
+                            onPressed: () => state.leaveVoiceChannel(),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
+                      ),
+                    );
+                  } else if (canDeleteChannel) {
+                    trailing = IconButton(
+                      icon: const Icon(
+                        Icons.delete_outline,
+                        color: Colors.redAccent,
+                        size: 18,
+                      ),
+                      tooltip: "Delete channel",
+                      onPressed: () =>
+                          _showDeleteVoiceChannelDialog(context, state, channel),
+                    );
                   }
 
                   return Column(
@@ -348,10 +490,7 @@ class _SidebarState extends State<Sidebar> {
                         subtitle: isActive
                             ? Text("${participants.length} connected")
                             : null,
-                        trailing: isActive
-                            ? const Icon(Icons.call_end,
-                                color: Colors.redAccent, size: 18)
-                            : null,
+                        trailing: trailing,
                         selected: isActive,
                         selectedTileColor: const Color(0xFF40444B),
                         onTap: () =>
@@ -414,9 +553,11 @@ class _SidebarState extends State<Sidebar> {
                     style: const TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                   const SizedBox(height: 6),
-                  _AnimatedMicInputLevel(
-                    targetLevel: micLevel,
-                    color: _micLevelColor(state, micLevel),
+                  ExcludeSemantics(
+                    child: _AnimatedMicInputLevel(
+                      targetLevel: micLevel,
+                      color: _micLevelColor(state, micLevel),
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Row(

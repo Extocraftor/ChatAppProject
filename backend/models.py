@@ -3,19 +3,38 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
 
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    role = Column(String, default="member", nullable=False)
     messages = relationship("Message", back_populates="user")
+    created_channels = relationship(
+        "Channel",
+        back_populates="creator",
+        foreign_keys="Channel.creator_user_id",
+    )
+    created_voice_channels = relationship(
+        "VoiceChannel",
+        back_populates="creator",
+        foreign_keys="VoiceChannel.creator_user_id",
+    )
+
 
 class Channel(Base):
     __tablename__ = "channels"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     description = Column(String)
+    creator_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     messages = relationship("Message", back_populates="channel")
+    creator = relationship(
+        "User",
+        back_populates="created_channels",
+        foreign_keys=[creator_user_id],
+    )
 
 
 class VoiceChannel(Base):
@@ -23,6 +42,12 @@ class VoiceChannel(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     description = Column(String)
+    creator_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    creator = relationship(
+        "User",
+        back_populates="created_voice_channels",
+        foreign_keys=[creator_user_id],
+    )
 
 
 class Message(Base):

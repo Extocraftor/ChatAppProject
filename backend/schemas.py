@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 class MessageBase(BaseModel):
     content: str
@@ -32,6 +32,7 @@ class ChannelCreate(ChannelBase):
 
 class ChannelSchema(ChannelBase):
     id: int
+    creator_user_id: Optional[int] = None
     messages: List[MessageSchema] = []
 
     class Config:
@@ -49,6 +50,7 @@ class VoiceChannelCreate(VoiceChannelBase):
 
 class VoiceChannelSchema(VoiceChannelBase):
     id: int
+    creator_user_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -68,6 +70,11 @@ class UserCreate(UserBase):
 
 class UserSchema(UserBase):
     id: int
+    role: str
 
     class Config:
         from_attributes = True
+
+
+class UserRoleUpdate(BaseModel):
+    role: Literal["member", "moderator", "admin"]

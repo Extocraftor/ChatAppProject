@@ -1,12 +1,13 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
 from typing import Any, Dict, List
 import json
 import os
 import logging
 
-from database import engine, get_db
+from database import SessionLocal, engine, get_db
 import models, schemas
 from passlib.context import CryptContext
 
@@ -23,8 +24,86 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password[:64], hashed_password)
 
 
+ROLE_MEMBER = "member"
+ROLE_MODERATOR = "moderator"
+ROLE_ADMIN = "admin"
+
+
+def _parse_username_set(env_name: str) -> set[str]:
+    raw = os.getenv(env_name, "")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+ADMIN_USERNAMES = _parse_username_set("ADMIN_USERNAMES")
+MODERATOR_USERNAMES = _parse_username_set("MODERATOR_USERNAMES")
+
+
+def _ensure_schema_columns() -> None:
+    inspector = inspect(engine)
+
+    with engine.begin() as conn:
+        user_columns = {column["name"] for column in inspector.get_columns("users")}
+        if "role" not in user_columns:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'member'")
+            )
+
+        channel_columns = {
+            column["name"] for column in inspector.get_columns("channels")
+        }
+        if "creator_user_id" not in channel_columns:
+            conn.execute(
+                text("ALTER TABLE channels ADD COLUMN creator_user_id INTEGER")
+            )
+
+        voice_channel_columns = {
+            column["name"] for column in inspector.get_columns("voice_channels")
+        }
+        if "creator_user_id" not in voice_channel_columns:
+            conn.execute(
+                text("ALTER TABLE voice_channels ADD COLUMN creator_user_id INTEGER")
+            )
+
+
+def _seed_existing_user_roles() -> None:
+    db = SessionLocal()
+    try:
+        users = db.query(models.User).all()
+        if not users:
+            return
+
+        changed = False
+        for user in users:
+            normalized_username = user.username.strip().lower()
+            desired_role = None
+            if normalized_username in ADMIN_USERNAMES:
+                desired_role = ROLE_ADMIN
+            elif (
+                normalized_username in MODERATOR_USERNAMES
+                and user.role != ROLE_ADMIN
+            ):
+                desired_role = ROLE_MODERATOR
+
+            if desired_role and user.role != desired_role:
+                user.role = desired_role
+                changed = True
+
+        has_admin = any(user.role == ROLE_ADMIN for user in users)
+        if not has_admin:
+            first_user = min(users, key=lambda user: user.id)
+            first_user.role = ROLE_ADMIN
+            changed = True
+
+        if changed:
+            db.commit()
+    finally:
+        db.close()
+
+
 # Create all tables on startup
 models.Base.metadata.create_all(bind=engine)
+_ensure_schema_columns()
+_seed_existing_user_roles()
 
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")
@@ -66,6 +145,14 @@ class ConnectionManager:
                 await connection.send_text(message)
             except Exception:
                 self.disconnect(connection, channel_id)
+
+    async def close_channel(self, channel_id: int):
+        connections = self.active_connections.pop(channel_id, [])
+        for connection in list(connections):
+            try:
+                await connection.close(code=1008)
+            except Exception:
+                pass
 
 
 # Connection manager for voice channels/WebRTC signaling
@@ -160,9 +247,44 @@ class VoiceConnectionManager:
                 continue
             await self.send_to_user(channel_id, user_id, payload)
 
+    async def close_channel(self, channel_id: int):
+        channel_connections = self.active_connections.pop(channel_id, {})
+        self.usernames.pop(channel_id, None)
+        self.mute_states.pop(channel_id, None)
+        for websocket in list(channel_connections.values()):
+            try:
+                await websocket.close(code=1008)
+            except Exception:
+                pass
+
 
 manager = ConnectionManager()
 voice_manager = VoiceConnectionManager()
+
+
+def _resolve_user_role(username: str, db: Session) -> str:
+    normalized_username = username.strip().lower()
+    if normalized_username in ADMIN_USERNAMES:
+        return ROLE_ADMIN
+    if normalized_username in MODERATOR_USERNAMES:
+        return ROLE_MODERATOR
+
+    user_count = db.query(models.User.id).count()
+    if user_count == 0:
+        return ROLE_ADMIN
+
+    return ROLE_MEMBER
+
+
+def _is_staff(user: models.User) -> bool:
+    return user.role in {ROLE_ADMIN, ROLE_MODERATOR}
+
+
+def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
+    actor_user = db.query(models.User).filter(models.User.id == actor_user_id).first()
+    if not actor_user:
+        raise HTTPException(status_code=404, detail="Actor user not found")
+    return actor_user
 
 
 # --- REST ENDPOINTS ---
@@ -175,7 +297,12 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Username already registered")
 
     hashed_pwd = get_password_hash(user.password)
-    db_user = models.User(username=user.username, hashed_password=hashed_pwd)
+    role = _resolve_user_role(user.username, db)
+    db_user = models.User(
+        username=user.username,
+        hashed_password=hashed_pwd,
+        role=role,
+    )
     db.add(db_user)
     try:
         db.commit()
@@ -191,6 +318,27 @@ def list_users(db: Session = Depends(get_db)):
     return db.query(models.User).all()
 
 
+@app.patch("/users/{target_user_id}/role", response_model=schemas.UserSchema)
+def update_user_role(
+    target_user_id: int,
+    role_update: schemas.UserRoleUpdate,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    if actor_user.role != ROLE_ADMIN:
+        raise HTTPException(status_code=403, detail="Only admins can update roles")
+
+    target_user = db.query(models.User).filter(models.User.id == target_user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found")
+
+    target_user.role = role_update.role
+    db.commit()
+    db.refresh(target_user)
+    return target_user
+
+
 @app.post("/login/", response_model=schemas.UserSchema)
 def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
@@ -200,8 +348,21 @@ def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/channels/", response_model=schemas.ChannelSchema)
-def create_channel(channel: schemas.ChannelCreate, db: Session = Depends(get_db)):
-    db_channel = models.Channel(name=channel.name, description=channel.description)
+def create_channel(
+    channel: schemas.ChannelCreate,
+    actor_user_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    creator_user_id = None
+    if actor_user_id is not None:
+        actor_user = _ensure_actor_user(db, actor_user_id)
+        creator_user_id = actor_user.id
+
+    db_channel = models.Channel(
+        name=channel.name,
+        description=channel.description,
+        creator_user_id=creator_user_id,
+    )
     db.add(db_channel)
     db.commit()
     db.refresh(db_channel)
@@ -211,6 +372,32 @@ def create_channel(channel: schemas.ChannelCreate, db: Session = Depends(get_db)
 @app.get("/channels/", response_model=List[schemas.ChannelSchema])
 def list_channels(db: Session = Depends(get_db)):
     return db.query(models.Channel).all()
+
+
+@app.delete("/channels/{channel_id}")
+async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+
+    db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not db_channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    can_delete = _is_staff(actor_user) or (
+        db_channel.creator_user_id is not None and db_channel.creator_user_id == actor_user.id
+    )
+    if not can_delete:
+        raise HTTPException(
+            status_code=403,
+            detail="Only moderators/admins or the channel creator can delete this channel",
+        )
+
+    await manager.close_channel(channel_id)
+    db.query(models.Message).filter(models.Message.channel_id == channel_id).delete(
+        synchronize_session=False
+    )
+    db.delete(db_channel)
+    db.commit()
+    return {"detail": "Channel deleted"}
 
 
 @app.get("/channels/{channel_id}/messages/", response_model=List[schemas.MessageSchema])
@@ -225,7 +412,16 @@ def get_messages(channel_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/voice-channels/", response_model=schemas.VoiceChannelSchema)
-def create_voice_channel(channel: schemas.VoiceChannelCreate, db: Session = Depends(get_db)):
+def create_voice_channel(
+    channel: schemas.VoiceChannelCreate,
+    actor_user_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    creator_user_id = None
+    if actor_user_id is not None:
+        actor_user = _ensure_actor_user(db, actor_user_id)
+        creator_user_id = actor_user.id
+
     existing_channel = (
         db.query(models.VoiceChannel)
         .filter(models.VoiceChannel.name == channel.name)
@@ -234,7 +430,11 @@ def create_voice_channel(channel: schemas.VoiceChannelCreate, db: Session = Depe
     if existing_channel:
         raise HTTPException(status_code=400, detail="Voice channel already exists")
 
-    db_channel = models.VoiceChannel(name=channel.name, description=channel.description)
+    db_channel = models.VoiceChannel(
+        name=channel.name,
+        description=channel.description,
+        creator_user_id=creator_user_id,
+    )
     db.add(db_channel)
     try:
         db.commit()
@@ -249,6 +449,39 @@ def create_voice_channel(channel: schemas.VoiceChannelCreate, db: Session = Depe
 @app.get("/voice-channels/", response_model=List[schemas.VoiceChannelSchema])
 def list_voice_channels(db: Session = Depends(get_db)):
     return db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+
+
+@app.delete("/voice-channels/{voice_channel_id}")
+async def delete_voice_channel(
+    voice_channel_id: int,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    db_voice_channel = (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.id == voice_channel_id)
+        .first()
+    )
+    if not db_voice_channel:
+        raise HTTPException(status_code=404, detail="Voice channel not found")
+
+    can_delete = _is_staff(actor_user) or (
+        db_voice_channel.creator_user_id is not None
+        and db_voice_channel.creator_user_id == actor_user.id
+    )
+    if not can_delete:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only moderators/admins or the channel creator can delete this voice channel"
+            ),
+        )
+
+    await voice_manager.close_channel(voice_channel_id)
+    db.delete(db_voice_channel)
+    db.commit()
+    return {"detail": "Voice channel deleted"}
 
 
 @app.get(

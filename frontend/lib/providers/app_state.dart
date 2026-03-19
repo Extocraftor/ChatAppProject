@@ -155,6 +155,31 @@ class AppState extends ChangeNotifier {
       Map<String, String>.unmodifiable(_inputTestRawStats);
   Map<int, double> get voiceParticipantVolumes =>
       Map<int, double>.unmodifiable(_voiceParticipantVolumes);
+  bool get canModerateChannels {
+    final role = currentUser?.role.toLowerCase();
+    return role == "admin" || role == "moderator";
+  }
+  bool canDeleteTextChannel(Channel channel) {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return false;
+    }
+    if (canModerateChannels) {
+      return true;
+    }
+    return channel.creatorUserId != null && channel.creatorUserId == userId;
+  }
+
+  bool canDeleteVoiceChannel(VoiceChannel channel) {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return false;
+    }
+    if (canModerateChannels) {
+      return true;
+    }
+    return channel.creatorUserId != null && channel.creatorUserId == userId;
+  }
 
   double voiceParticipantVolumeFor(int userId) {
     return (_voiceParticipantVolumes[userId] ?? 1.0)
@@ -231,9 +256,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<bool> createChannel(String name, String? description) async {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return false;
+    }
+
     try {
       final response = await http.post(
-        Uri.parse("$baseUrl/channels/"),
+        Uri.parse("$baseUrl/channels/?actor_user_id=$userId"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"name": name, "description": description}),
       );
@@ -250,9 +280,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<bool> createVoiceChannel(String name, String? description) async {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return false;
+    }
+
     try {
       final response = await http.post(
-        Uri.parse("$baseUrl/voice-channels/"),
+        Uri.parse("$baseUrl/voice-channels/?actor_user_id=$userId"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"name": name, "description": description}),
       );
@@ -273,10 +308,50 @@ class AppState extends ChangeNotifier {
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       channels = data.map((c) => Channel.fromJson(c)).toList();
+
+      if (activeChannel != null) {
+        final stillExists = channels.any((c) => c.id == activeChannel!.id);
+        if (!stillExists) {
+          _channel?.sink.close();
+          _channel = null;
+          activeChannel = null;
+          messages = [];
+        }
+      }
+
       if (channels.isNotEmpty && activeChannel == null) {
         selectChannel(channels.first);
+        return;
       }
       notifyListeners();
+    }
+  }
+
+  Future<bool> deleteChannel(int channelId) async {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return false;
+    }
+
+    try {
+      final response = await http.delete(
+        Uri.parse("$baseUrl/channels/$channelId?actor_user_id=$userId"),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+
+      if (activeChannel?.id == channelId) {
+        _channel?.sink.close();
+        _channel = null;
+        activeChannel = null;
+        messages = [];
+      }
+
+      await fetchChannels();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -1341,6 +1416,31 @@ class AppState extends ChangeNotifier {
 
     if (shouldNotify) {
       notifyListeners();
+    }
+  }
+
+  Future<bool> deleteVoiceChannel(int channelId) async {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return false;
+    }
+
+    try {
+      final response = await http.delete(
+        Uri.parse("$baseUrl/voice-channels/$channelId?actor_user_id=$userId"),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+
+      if (activeVoiceChannel?.id == channelId) {
+        await leaveVoiceChannel(notify: false);
+      }
+
+      await fetchVoiceChannels();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
