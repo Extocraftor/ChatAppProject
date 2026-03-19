@@ -4,7 +4,6 @@ import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
-import 'input_test_screen.dart';
 
 class VoiceDiagnosticsScreen extends StatelessWidget {
   const VoiceDiagnosticsScreen({super.key});
@@ -18,10 +17,6 @@ class VoiceDiagnosticsScreen extends StatelessWidget {
       );
     final ping = state.voicePingMs;
     final micLevel = state.voiceMicLevel.clamp(0.0, 1.0);
-    final selectedInputId = state.selectedAudioInputDeviceId;
-    final hasSelectedInput = selectedInputId != null &&
-        state.audioInputDevices.any((d) => d.deviceId == selectedInputId);
-    final effectiveSelectedInputId = hasSelectedInput ? selectedInputId : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -93,82 +88,6 @@ class VoiceDiagnosticsScreen extends StatelessWidget {
           _MetricCard(
             title: "Microphone",
             children: [
-              if (state.isAudioInputDevicesLoading)
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 8),
-                  child: LinearProgressIndicator(minHeight: 2),
-                ),
-              if (state.audioInputDevices.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: DropdownButtonFormField<String>(
-                    value: effectiveSelectedInputId,
-                    decoration: const InputDecoration(
-                      labelText: "Input Device",
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    items: state.audioInputDevices.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final device = entry.value;
-                      return DropdownMenuItem<String>(
-                        value: device.deviceId,
-                        child: Text(
-                          _audioInputLabel(device, index),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      );
-                    }).toList(),
-                    onChanged: state.isAudioInputSwitching
-                        ? null
-                        : (nextDeviceId) {
-                            if (nextDeviceId == null) {
-                              return;
-                            }
-                            state.selectAudioInputDevice(nextDeviceId);
-                          },
-                  ),
-                )
-              else
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        "No audio input devices found yet.",
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    ),
-                    TextButton.icon(
-                      onPressed: state.isAudioInputDevicesLoading
-                          ? null
-                          : () => state.refreshAudioInputDevices(),
-                      icon: const Icon(Icons.refresh, size: 16),
-                      label: const Text("Refresh"),
-                    ),
-                  ],
-                ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const InputTestScreen(),
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.mic),
-                  label: const Text("Open Input Test"),
-                ),
-              ),
-              if (state.isAudioInputSwitching)
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 8),
-                  child: Text(
-                    "Switching microphone input...",
-                    style: TextStyle(color: Colors.amberAccent),
-                  ),
-                ),
               _MetricRow(
                 label: "Audio track",
                 value: state.hasLocalAudioTrack ? "Present" : "Missing",
@@ -310,14 +229,6 @@ class VoiceDiagnosticsScreen extends StatelessWidget {
       return "${elapsed.inMinutes}m ago";
     }
     return "${elapsed.inHours}h ago";
-  }
-
-  static String _audioInputLabel(MediaDeviceInfo device, int index) {
-    final label = device.label.trim();
-    if (label.isNotEmpty) {
-      return label;
-    }
-    return "Microphone ${index + 1}";
   }
 }
 
