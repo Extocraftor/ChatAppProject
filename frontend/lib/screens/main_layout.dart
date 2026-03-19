@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/app_state.dart';
@@ -96,6 +97,29 @@ class MainLayout extends StatelessWidget {
                     ),
                   ),
                   const MessageInput(),
+                  if (state.activeVoiceChannel != null &&
+                      state.remoteAudioRenderers.isNotEmpty)
+                    SizedBox(
+                      width: 1,
+                      height: 1,
+                      child: Opacity(
+                        opacity: 0,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: state.remoteAudioRenderers.entries
+                              .map(
+                                (entry) => RTCVideoView(
+                                  entry.value,
+                                  key: ValueKey('remote-audio-${entry.key}'),
+                                  objectFit: RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitContain,
+                                  mirror: false,
+                                ),
+                              )
+                              .toList(),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),

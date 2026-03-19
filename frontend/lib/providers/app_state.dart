@@ -37,6 +37,10 @@ class AppState extends ChangeNotifier {
   MediaStream? _localStream;
   final Map<int, RTCPeerConnection> _peerConnections = {};
   final Map<int, MediaStream> _remoteStreams = {};
+  final Map<int, RTCVideoRenderer> _remoteAudioRenderers = {};
+  final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
+  final Set<int> _remoteDescriptionReadyUsers = <int>{};
+  Future<void> _voiceSignalProcessingQueue = Future.value();
   Future<void>? _leaveVoiceChannelTask;
   bool isSelfMuted = false;
   bool _voiceConnecting = false;
@@ -121,6 +125,8 @@ class AppState extends ChangeNotifier {
   double get voiceOutboundPacketsPerSecond => _voiceOutboundPacketsPerSecond;
   int get activePeerConnectionCount => _peerConnections.length;
   int get remoteStreamCount => _remoteStreams.length;
+  Map<int, RTCVideoRenderer> get remoteAudioRenderers =>
+      Map<int, RTCVideoRenderer>.unmodifiable(_remoteAudioRenderers);
   Map<int, RTCPeerConnectionState> get peerConnectionStates =>
       Map.unmodifiable(_peerConnectionStates);
   bool get hasLocalAudioTrack =>
@@ -690,13 +696,14 @@ class AppState extends ChangeNotifier {
       _voiceSignalChannel = signalChannel;
       _voiceConnectedAt = DateTime.now();
       _resetVoiceDiagnostics();
+      _queuedRemoteIceCandidates.clear();
+      _remoteDescriptionReadyUsers.clear();
+      _voiceSignalProcessingQueue = Future.value();
       _startVoicePing();
       _startVoiceDiagnostics();
 
       _voiceSignalChannel!.stream.listen(
-        (data) {
-          unawaited(_handleVoiceSignal(data));
-        },
+        _enqueueVoiceSignal,
         onDone: () {
           _handleVoiceSocketClosed();
         },
@@ -732,6 +739,14 @@ class AppState extends ChangeNotifier {
         : "Voice connection error: $error";
 
     unawaited(leaveVoiceChannel(notify: true, clearError: false));
+  }
+
+  void _enqueueVoiceSignal(dynamic data) {
+    _voiceSignalProcessingQueue = _voiceSignalProcessingQueue
+        .then((_) => _handleVoiceSignal(data))
+        .catchError((_) {
+      // Keep the queue alive even if one payload fails.
+    });
   }
 
   Future<void> _handleVoiceSignal(dynamic data) async {
@@ -847,10 +862,20 @@ class AppState extends ChangeNotifier {
     };
 
     peerConnection.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        _remoteStreams[remoteUserId] = event.streams.first;
-        notifyListeners();
+      if (event.track.kind != 'audio') {
+        return;
       }
+
+      final remoteStream = event.streams.isNotEmpty
+          ? event.streams.first
+          : _remoteStreams[remoteUserId];
+      if (remoteStream == null) {
+        return;
+      }
+
+      _remoteStreams[remoteUserId] = remoteStream;
+      unawaited(_attachRemoteAudioRenderer(remoteUserId, remoteStream));
+      notifyListeners();
     };
 
     peerConnection.onConnectionState = (state) {
@@ -871,6 +896,7 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    _remoteDescriptionReadyUsers.remove(remoteUserId);
     final peerConnection = await _ensurePeerConnection(remoteUserId);
 
     final offer = await peerConnection.createOffer({
@@ -909,6 +935,8 @@ class AppState extends ChangeNotifier {
     await peerConnection.setRemoteDescription(
       RTCSessionDescription(remoteSdp, remoteType),
     );
+    _remoteDescriptionReadyUsers.add(fromUserId);
+    await _flushQueuedIceCandidates(fromUserId, peerConnection);
 
     final answer = await peerConnection.createAnswer({
       'offerToReceiveAudio': true,
@@ -950,6 +978,8 @@ class AppState extends ChangeNotifier {
     await peerConnection.setRemoteDescription(
       RTCSessionDescription(remoteSdp, remoteType),
     );
+    _remoteDescriptionReadyUsers.add(fromUserId);
+    await _flushQueuedIceCandidates(fromUserId, peerConnection);
   }
 
   Future<void> _handleRemoteIceCandidate(Map<String, dynamic> payload) async {
@@ -969,14 +999,47 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    final peerConnection = await _ensurePeerConnection(fromUserId);
-    await peerConnection.addCandidate(
-      RTCIceCandidate(
-        candidate,
-        sdpMid is String ? sdpMid : null,
-        sdpMLineIndex is int ? sdpMLineIndex : null,
-      ),
+    final parsedCandidate = RTCIceCandidate(
+      candidate,
+      sdpMid is String ? sdpMid : null,
+      sdpMLineIndex is int ? sdpMLineIndex : null,
     );
+
+    final peerConnection = await _ensurePeerConnection(fromUserId);
+    if (!_remoteDescriptionReadyUsers.contains(fromUserId)) {
+      _queuedRemoteIceCandidates
+          .putIfAbsent(fromUserId, () => <RTCIceCandidate>[])
+          .add(parsedCandidate);
+      return;
+    }
+
+    try {
+      await peerConnection.addCandidate(parsedCandidate);
+    } catch (_) {
+      _queuedRemoteIceCandidates
+          .putIfAbsent(fromUserId, () => <RTCIceCandidate>[])
+          .add(parsedCandidate);
+    }
+  }
+
+  Future<void> _flushQueuedIceCandidates(
+    int remoteUserId,
+    RTCPeerConnection peerConnection,
+  ) async {
+    final queuedCandidates = _queuedRemoteIceCandidates.remove(remoteUserId);
+    if (queuedCandidates == null || queuedCandidates.isEmpty) {
+      return;
+    }
+
+    for (final candidate in queuedCandidates) {
+      try {
+        await peerConnection.addCandidate(candidate);
+      } catch (_) {
+        _queuedRemoteIceCandidates
+            .putIfAbsent(remoteUserId, () => <RTCIceCandidate>[])
+            .add(candidate);
+      }
+    }
   }
 
   void _sendVoiceSignal(Map<String, dynamic> payload) {
@@ -1143,6 +1206,9 @@ class AppState extends ChangeNotifier {
     activeVoiceChannel = null;
     isSelfMuted = false;
     _voiceConnectedAt = null;
+    _queuedRemoteIceCandidates.clear();
+    _remoteDescriptionReadyUsers.clear();
+    _voiceSignalProcessingQueue = Future.value();
     if (_inputTestUsesVoiceStream) {
       await stopInputTest(notify: false);
     }
@@ -1158,6 +1224,10 @@ class AppState extends ChangeNotifier {
     }
 
     _peerConnections.clear();
+
+    for (final userId in _remoteAudioRenderers.keys.toList()) {
+      await _disposeRemoteAudioRenderer(userId);
+    }
 
     for (final stream in _remoteStreams.values.toSet()) {
       await _disposeStreamSafely(stream);
@@ -1187,11 +1257,63 @@ class AppState extends ChangeNotifier {
       await _closePeerConnectionSafely(peerConnection);
     }
 
+    _remoteDescriptionReadyUsers.remove(remoteUserId);
+    _queuedRemoteIceCandidates.remove(remoteUserId);
     _peerConnectionStates.remove(remoteUserId);
+    await _disposeRemoteAudioRenderer(remoteUserId);
 
     final remoteStream = _remoteStreams.remove(remoteUserId);
     if (remoteStream != null) {
       await _disposeStreamSafely(remoteStream);
+    }
+  }
+
+  Future<void> _attachRemoteAudioRenderer(
+    int remoteUserId,
+    MediaStream remoteStream,
+  ) async {
+    var renderer = _remoteAudioRenderers[remoteUserId];
+    var shouldNotify = false;
+
+    if (renderer == null) {
+      renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      _remoteAudioRenderers[remoteUserId] = renderer;
+      shouldNotify = true;
+    }
+
+    final currentStream = renderer.srcObject;
+    if (currentStream == null || currentStream.id != remoteStream.id) {
+      renderer.srcObject = remoteStream;
+      try {
+        renderer.muted = false;
+      } catch (_) {
+        // Some platforms throw if mute toggling isn't supported for this stream.
+      }
+      shouldNotify = true;
+    }
+
+    if (shouldNotify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _disposeRemoteAudioRenderer(int remoteUserId) async {
+    final renderer = _remoteAudioRenderers.remove(remoteUserId);
+    if (renderer == null) {
+      return;
+    }
+
+    try {
+      renderer.srcObject = null;
+    } catch (_) {
+      // Ignore renderer detachment failures during teardown.
+    }
+
+    try {
+      await renderer.dispose();
+    } catch (_) {
+      // Ignore renderer disposal failures during teardown.
     }
   }
 
@@ -1915,6 +2037,9 @@ class AppState extends ChangeNotifier {
     for (final stream in _remoteStreams.values.toSet()) {
       unawaited(_disposeStreamSafely(stream));
     }
+    for (final userId in _remoteAudioRenderers.keys.toList()) {
+      unawaited(_disposeRemoteAudioRenderer(userId));
+    }
 
     final localStream = _localStream;
     if (localStream != null) {
@@ -1924,6 +2049,10 @@ class AppState extends ChangeNotifier {
     _peerConnections.clear();
     _peerConnectionStates.clear();
     _remoteStreams.clear();
+    _remoteAudioRenderers.clear();
+    _queuedRemoteIceCandidates.clear();
+    _remoteDescriptionReadyUsers.clear();
+    _voiceSignalProcessingQueue = Future.value();
     _pendingVoicePings.clear();
     _localStream = null;
     scrollController.dispose();
