@@ -735,13 +735,15 @@ async def voice_websocket_endpoint(
 if __name__ == "__main__":
     import uvicorn
 
+    port = int(os.getenv("PORT", os.getenv("UVICORN_PORT", "8000")))
     ws_ping_interval = float(os.getenv("WS_PING_INTERVAL", "30"))
     ws_ping_timeout = float(os.getenv("WS_PING_TIMEOUT", "120"))
 
+    logger.info("starting uvicorn on port %s", port)
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=port,
         ws_ping_interval=ws_ping_interval,
         ws_ping_timeout=ws_ping_timeout,
     )
