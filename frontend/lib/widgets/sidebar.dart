@@ -149,6 +149,7 @@ class Sidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final micLevel = state.voiceMicLevel.clamp(0.0, 1.0).toDouble();
 
     return Container(
       width: 270,
@@ -256,8 +257,8 @@ class Sidebar extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
-                          color:
-                              _pingColor(state.voicePingMs).withOpacity(0.15),
+                          color: _pingColor(state.voicePingMs)
+                              .withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(999),
                         ),
                         child: Text(
@@ -277,24 +278,9 @@ class Sidebar extends StatelessWidget {
                     style: const TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                   const SizedBox(height: 6),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(999),
-                    child: LinearProgressIndicator(
-                      minHeight: 8,
-                      value: state.voiceMicLevel.clamp(0.0, 1.0),
-                      backgroundColor: const Color(0xFF2F3136),
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        _micLevelColor(
-                          state,
-                          state.voiceMicLevel,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    "Mic input ${(state.voiceMicLevel.clamp(0.0, 1.0) * 100).round()}%",
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  _AnimatedMicInputLevel(
+                    targetLevel: micLevel,
+                    color: _micLevelColor(state, micLevel),
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -363,6 +349,47 @@ class Sidebar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AnimatedMicInputLevel extends StatelessWidget {
+  const _AnimatedMicInputLevel({
+    required this.targetLevel,
+    required this.color,
+  });
+
+  final double targetLevel;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      tween: Tween<double>(end: targetLevel),
+      builder: (context, animatedLevel, child) {
+        final level = animatedLevel.clamp(0.0, 1.0).toDouble();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(
+                minHeight: 8,
+                value: level,
+                backgroundColor: const Color(0xFF2F3136),
+                valueColor: AlwaysStoppedAnimation<Color>(color),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              "Mic input ${(level * 100).round()}%",
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        );
+      },
     );
   }
 }

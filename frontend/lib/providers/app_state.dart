@@ -514,7 +514,10 @@ class AppState extends ChangeNotifier {
 
     try {
       final reports = await probeConnection.getStats();
-      final sample = _extractMicDiagnosticsFromStats(reports);
+      final sample = _extractMicDiagnosticsFromStats(
+        reports,
+        includeInbound: false,
+      );
       strongestAudioLevel = sample.audioLevel;
       totalAudioEnergy = sample.totalAudioEnergy;
       totalSamplesDuration = sample.totalSamplesDuration;
@@ -528,7 +531,10 @@ class AppState extends ChangeNotifier {
     if (probeSender != null) {
       try {
         final reports = await probeSender.getStats();
-        final sample = _extractMicDiagnosticsFromStats(reports);
+        final sample = _extractMicDiagnosticsFromStats(
+          reports,
+          includeInbound: false,
+        );
         if (sample.audioLevel != null &&
             (strongestAudioLevel == null ||
                 sample.audioLevel! > strongestAudioLevel)) {
@@ -1422,7 +1428,7 @@ class AppState extends ChangeNotifier {
   void _startVoiceDiagnostics() {
     _voiceDiagnosticsTimer?.cancel();
     _voiceDiagnosticsTimer =
-        Timer.periodic(const Duration(milliseconds: 700), (_) {
+        Timer.periodic(const Duration(milliseconds: 260), (_) {
       unawaited(_refreshVoiceDiagnostics());
     });
     unawaited(_refreshVoiceDiagnostics());
@@ -1455,7 +1461,10 @@ class AppState extends ChangeNotifier {
       if (probeConnection != null && probeTrack != null) {
         try {
           final probeReports = await probeConnection.getStats();
-          final probeSample = _extractMicDiagnosticsFromStats(probeReports);
+          final probeSample = _extractMicDiagnosticsFromStats(
+            probeReports,
+            includeInbound: false,
+          );
           if (probeSample.audioLevel != null) {
             strongestAudioLevel = probeSample.audioLevel;
           }
@@ -1474,7 +1483,10 @@ class AppState extends ChangeNotifier {
       if (probeRtpSender != null) {
         try {
           final probeReports = await probeRtpSender.getStats();
-          final probeSample = _extractMicDiagnosticsFromStats(probeReports);
+          final probeSample = _extractMicDiagnosticsFromStats(
+            probeReports,
+            includeInbound: false,
+          );
           if (probeSample.audioLevel != null) {
             strongestAudioLevel = probeSample.audioLevel;
           }
@@ -1499,14 +1511,6 @@ class AppState extends ChangeNotifier {
         } catch (_) {
           continue;
         }
-
-        final micSample = _extractMicDiagnosticsFromStats(reports);
-        if (micSample.audioLevel != null &&
-            (strongestAudioLevel == null ||
-                micSample.audioLevel! > strongestAudioLevel)) {
-          strongestAudioLevel = micSample.audioLevel;
-        }
-        voiceActivity = voiceActivity || micSample.voiceActivity;
 
         for (final report in reports) {
           final values = report.values;
@@ -1578,8 +1582,11 @@ class AppState extends ChangeNotifier {
         }
       }
 
-      final smoothedMicLevel =
-          (_voiceMicLevel * 0.6 + targetMicLevel * 0.4).clamp(0.0, 1.0);
+      final isRising = targetMicLevel > _voiceMicLevel;
+      final smoothingWeight = isRising ? 0.72 : 0.48;
+      final smoothedMicLevel = (_voiceMicLevel * (1 - smoothingWeight) +
+              targetMicLevel * smoothingWeight)
+          .clamp(0.0, 1.0);
 
       double bitrateKbps = _voiceOutboundBitrateKbps;
       double packetsPerSecond = _voiceOutboundPacketsPerSecond;
@@ -1609,7 +1616,7 @@ class AppState extends ChangeNotifier {
       final pingFromPeerStats =
           (_voicePingMs == null || _voicePingMs == 0) ? peerRttMs : null;
       final hasMeaningfulChange =
-          (_voiceMicLevel - smoothedMicLevel).abs() > 0.02 ||
+          (_voiceMicLevel - smoothedMicLevel).abs() > 0.01 ||
               (_voiceOutboundBitrateKbps - bitrateKbps).abs() > 2 ||
               (_voiceOutboundPacketsPerSecond - packetsPerSecond).abs() > 0.5 ||
               pingFromPeerStats != null;
@@ -1630,7 +1637,9 @@ class AppState extends ChangeNotifier {
   }
 
   _MicDiagnosticsSample _extractMicDiagnosticsFromStats(
-      List<StatsReport> reports) {
+    List<StatsReport> reports, {
+    bool includeInbound = true,
+  }) {
     double? audioLevel;
     bool voiceActivity = false;
     double? totalAudioEnergy;
@@ -1655,6 +1664,13 @@ class AppState extends ChangeNotifier {
           reportType.contains('audio') ||
           ((values['id']?.toString().toLowerCase().contains('audio')) ?? false);
       if (!isAudio && reportType != 'media-source' && reportType != 'track') {
+        continue;
+      }
+
+      if (!includeInbound &&
+          (reportType == 'inbound-rtp' ||
+              reportType == 'remote-inbound-rtp' ||
+              reportType == 'remote-outbound-rtp')) {
         continue;
       }
 
