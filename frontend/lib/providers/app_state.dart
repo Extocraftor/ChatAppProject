@@ -41,6 +41,20 @@ class AppState extends ChangeNotifier {
   bool _voiceConnecting = false;
   bool _voiceJoinInProgress = false;
   String? voiceError;
+  Timer? _voiceDiagnosticsTimer;
+  bool _voiceDiagnosticsInFlight = false;
+  final Map<int, DateTime> _pendingVoicePings = {};
+  final Map<int, RTCPeerConnectionState> _peerConnectionStates = {};
+  int _voicePingSequence = 0;
+  int? _voicePingMs;
+  DateTime? _voiceConnectedAt;
+  DateTime? _lastVoicePongAt;
+  double _voiceMicLevel = 0;
+  double _voiceOutboundBitrateKbps = 0;
+  double _voiceOutboundPacketsPerSecond = 0;
+  int? _lastStatsBytesSent;
+  int? _lastStatsPacketsSent;
+  DateTime? _lastStatsSnapshotAt;
 
   // Interaction state
   Message? replyingTo;
@@ -52,6 +66,37 @@ class AppState extends ChangeNotifier {
   final ScrollController scrollController = ScrollController();
 
   bool get isVoiceConnecting => _voiceConnecting;
+  bool get isVoiceSignalConnected =>
+      activeVoiceChannel != null &&
+      _voiceSignalChannel != null &&
+      !_voiceConnecting;
+  String get voiceSignalStatusLabel {
+    if (_voiceConnecting) {
+      return "Connecting";
+    }
+    if (isVoiceSignalConnected) {
+      return "Connected";
+    }
+    if (activeVoiceChannel != null) {
+      return "Disconnected";
+    }
+    return "Idle";
+  }
+
+  int? get voicePingMs => _voicePingMs;
+  DateTime? get voiceConnectedAt => _voiceConnectedAt;
+  DateTime? get lastVoicePongAt => _lastVoicePongAt;
+  double get voiceMicLevel => _voiceMicLevel;
+  double get voiceOutboundBitrateKbps => _voiceOutboundBitrateKbps;
+  double get voiceOutboundPacketsPerSecond => _voiceOutboundPacketsPerSecond;
+  int get activePeerConnectionCount => _peerConnections.length;
+  int get remoteStreamCount => _remoteStreams.length;
+  Map<int, RTCPeerConnectionState> get peerConnectionStates =>
+      Map.unmodifiable(_peerConnectionStates);
+  bool get hasLocalAudioTrack =>
+      _localStream?.getAudioTracks().isNotEmpty == true;
+  bool get isLocalMicTrackEnabled =>
+      _localStream?.getAudioTracks().any((track) => track.enabled) == true;
 
   Future<String?> register(String username, String password) async {
     try {
@@ -250,7 +295,10 @@ class AppState extends ChangeNotifier {
       );
       await signalChannel.ready;
       _voiceSignalChannel = signalChannel;
+      _voiceConnectedAt = DateTime.now();
+      _resetVoiceDiagnostics();
       _startVoicePing();
+      _startVoiceDiagnostics();
 
       _voiceSignalChannel!.stream.listen(
         (data) {
@@ -361,6 +409,11 @@ class AppState extends ChangeNotifier {
         await _handleRemoteIceCandidate(payload);
         return;
       }
+
+      if (type == 'pong') {
+        _handleVoicePong(payload);
+        return;
+      }
     } catch (_) {
       // Ignore malformed signaling payloads.
     }
@@ -374,6 +427,8 @@ class AppState extends ChangeNotifier {
 
     final peerConnection = await createPeerConnection(_rtcConfiguration);
     _peerConnections[remoteUserId] = peerConnection;
+    _peerConnectionStates[remoteUserId] =
+        RTCPeerConnectionState.RTCPeerConnectionStateNew;
 
     if (_localStream != null) {
       for (final track in _localStream!.getAudioTracks()) {
@@ -401,16 +456,18 @@ class AppState extends ChangeNotifier {
     peerConnection.onTrack = (event) {
       if (event.streams.isNotEmpty) {
         _remoteStreams[remoteUserId] = event.streams.first;
+        notifyListeners();
       }
     };
 
     peerConnection.onConnectionState = (state) {
+      _peerConnectionStates[remoteUserId] = state;
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         unawaited(_closePeerConnection(remoteUserId));
-        notifyListeners();
       }
+      notifyListeners();
     };
 
     return peerConnection;
@@ -596,6 +653,9 @@ class AppState extends ChangeNotifier {
   }) async {
     _voicePingTimer?.cancel();
     _voicePingTimer = null;
+    _voiceDiagnosticsTimer?.cancel();
+    _voiceDiagnosticsTimer = null;
+    _voiceDiagnosticsInFlight = false;
 
     if (clearError) {
       voiceError = null;
@@ -607,6 +667,8 @@ class AppState extends ChangeNotifier {
     _voiceConnecting = false;
     activeVoiceChannel = null;
     isSelfMuted = false;
+    _voiceConnectedAt = null;
+    _resetVoiceDiagnostics();
 
     if (signalChannel != null) {
       await signalChannel.sink.close();
@@ -630,6 +692,7 @@ class AppState extends ChangeNotifier {
     }
 
     voiceParticipants.clear();
+    _peerConnectionStates.clear();
 
     if (notify) {
       notifyListeners();
@@ -644,6 +707,8 @@ class AppState extends ChangeNotifier {
       peerConnection.onConnectionState = null;
       await _closePeerConnectionSafely(peerConnection);
     }
+
+    _peerConnectionStates.remove(remoteUserId);
 
     final remoteStream = _remoteStreams.remove(remoteUserId);
     if (remoteStream != null) {
@@ -691,8 +756,13 @@ class AppState extends ChangeNotifier {
         errorText.contains('not found');
   }
 
+  void sendVoicePingNow() {
+    _sendVoicePing();
+  }
+
   void _startVoicePing() {
     _voicePingTimer?.cancel();
+    _sendVoicePing();
     _voicePingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_voiceSignalChannel == null) {
         _voicePingTimer?.cancel();
@@ -700,8 +770,270 @@ class AppState extends ChangeNotifier {
         return;
       }
 
-      _sendVoiceSignal({'type': 'ping'});
+      _sendVoicePing();
     });
+  }
+
+  void _sendVoicePing() {
+    if (_voiceSignalChannel == null) {
+      return;
+    }
+
+    _voicePingSequence += 1;
+    final pingId = _voicePingSequence;
+    _pendingVoicePings[pingId] = DateTime.now();
+
+    if (_pendingVoicePings.length > 8) {
+      final oldestPingId =
+          _pendingVoicePings.keys.reduce((a, b) => a < b ? a : b);
+      _pendingVoicePings.remove(oldestPingId);
+    }
+
+    _sendVoiceSignal({
+      'type': 'ping',
+      'ping_id': pingId,
+    });
+  }
+
+  void _handleVoicePong(Map<String, dynamic> payload) {
+    final now = DateTime.now();
+    DateTime? pingSentAt;
+
+    final pingId = _parseIntMetric(payload['ping_id']);
+    if (pingId != null) {
+      pingSentAt = _pendingVoicePings.remove(pingId);
+    }
+
+    if (pingSentAt == null && _pendingVoicePings.isNotEmpty) {
+      final oldestPingId =
+          _pendingVoicePings.keys.reduce((a, b) => a < b ? a : b);
+      pingSentAt = _pendingVoicePings.remove(oldestPingId);
+    }
+
+    if (pingSentAt != null) {
+      _voicePingMs = now.difference(pingSentAt).inMilliseconds;
+    }
+
+    _lastVoicePongAt = now;
+    notifyListeners();
+  }
+
+  void _startVoiceDiagnostics() {
+    _voiceDiagnosticsTimer?.cancel();
+    _voiceDiagnosticsTimer =
+        Timer.periodic(const Duration(milliseconds: 700), (_) {
+      unawaited(_refreshVoiceDiagnostics());
+    });
+    unawaited(_refreshVoiceDiagnostics());
+  }
+
+  Future<void> _refreshVoiceDiagnostics() async {
+    if (_voiceDiagnosticsInFlight ||
+        _voiceSignalChannel == null ||
+        activeVoiceChannel == null) {
+      return;
+    }
+
+    _voiceDiagnosticsInFlight = true;
+    try {
+      final now = DateTime.now();
+      final localAudioTracks =
+          _localStream?.getAudioTracks() ?? <MediaStreamTrack>[];
+      final localMicEnabled = localAudioTracks.any((track) => track.enabled);
+
+      double? strongestAudioLevel;
+      bool voiceActivity = false;
+      int totalBytesSent = 0;
+      int totalPacketsSent = 0;
+      int? peerRttMs;
+
+      for (final peerConnection in _peerConnections.values) {
+        List<StatsReport> reports;
+        try {
+          reports = await peerConnection.getStats();
+        } catch (_) {
+          continue;
+        }
+
+        for (final report in reports) {
+          final values = report.values;
+          final reportType =
+              (_readStringMetric(values, ['type']) ?? report.type)
+                  .toLowerCase();
+          final kind = _readStringMetric(
+            values,
+            ['kind', 'mediaType', 'media_type'],
+          )?.toLowerCase();
+          final isAudio = kind == 'audio' ||
+              ((values['id']?.toString().toLowerCase().contains('audio')) ??
+                  false);
+
+          final audioLevel = _parseDoubleMetric(
+            values['audioLevel'] ?? values['audio_level'],
+          );
+          if (audioLevel != null &&
+              (reportType == 'media-source' ||
+                  reportType == 'track' ||
+                  reportType == 'outbound-rtp' ||
+                  isAudio)) {
+            if (strongestAudioLevel == null ||
+                audioLevel > strongestAudioLevel) {
+              strongestAudioLevel = audioLevel;
+            }
+          }
+
+          final voiceActivityFlag =
+              values['voiceActivityFlag'] ?? values['voice_activity_flag'];
+          if (voiceActivityFlag == true ||
+              voiceActivityFlag.toString().toLowerCase() == 'true') {
+            voiceActivity = true;
+          }
+
+          if (reportType == 'outbound-rtp' && isAudio) {
+            totalBytesSent +=
+                _parseIntMetric(values['bytesSent'] ?? values['bytes_sent']) ??
+                    0;
+            totalPacketsSent += _parseIntMetric(
+                  values['packetsSent'] ?? values['packets_sent'],
+                ) ??
+                0;
+          }
+
+          final currentRoundTripTime = _parseDoubleMetric(
+            values['currentRoundTripTime'] ??
+                values['roundTripTime'] ??
+                values['round_trip_time'],
+          );
+          if (currentRoundTripTime != null &&
+              currentRoundTripTime > 0 &&
+              (reportType == 'candidate-pair' ||
+                  reportType == 'remote-inbound-rtp')) {
+            final rttMs = currentRoundTripTime > 10
+                ? currentRoundTripTime.round()
+                : (currentRoundTripTime * 1000).round();
+            if (peerRttMs == null || rttMs < peerRttMs) {
+              peerRttMs = rttMs;
+            }
+          }
+        }
+      }
+
+      double targetMicLevel = 0;
+      if (localMicEnabled && !isSelfMuted) {
+        if (strongestAudioLevel != null) {
+          targetMicLevel = strongestAudioLevel.clamp(0, 1).toDouble();
+        } else if (voiceActivity) {
+          targetMicLevel = 0.65;
+        } else if (_lastStatsPacketsSent != null &&
+            totalPacketsSent > _lastStatsPacketsSent!) {
+          targetMicLevel = 0.35;
+        }
+      }
+
+      final smoothedMicLevel =
+          (_voiceMicLevel * 0.6 + targetMicLevel * 0.4).clamp(0.0, 1.0);
+
+      double bitrateKbps = _voiceOutboundBitrateKbps;
+      double packetsPerSecond = _voiceOutboundPacketsPerSecond;
+
+      if (_lastStatsSnapshotAt != null &&
+          _lastStatsBytesSent != null &&
+          _lastStatsPacketsSent != null &&
+          totalBytesSent >= _lastStatsBytesSent! &&
+          totalPacketsSent >= _lastStatsPacketsSent!) {
+        final elapsedMs = now.difference(_lastStatsSnapshotAt!).inMilliseconds;
+        if (elapsedMs > 0) {
+          final elapsedSeconds = elapsedMs / 1000;
+          final byteDelta = totalBytesSent - _lastStatsBytesSent!;
+          final packetDelta = totalPacketsSent - _lastStatsPacketsSent!;
+          bitrateKbps = (byteDelta * 8) / elapsedSeconds / 1000;
+          packetsPerSecond = packetDelta / elapsedSeconds;
+        }
+      } else {
+        bitrateKbps = 0;
+        packetsPerSecond = 0;
+      }
+
+      _lastStatsBytesSent = totalBytesSent;
+      _lastStatsPacketsSent = totalPacketsSent;
+      _lastStatsSnapshotAt = now;
+
+      final pingFromPeerStats =
+          (_voicePingMs == null || _voicePingMs == 0) ? peerRttMs : null;
+      final hasMeaningfulChange =
+          (_voiceMicLevel - smoothedMicLevel).abs() > 0.02 ||
+              (_voiceOutboundBitrateKbps - bitrateKbps).abs() > 2 ||
+              (_voiceOutboundPacketsPerSecond - packetsPerSecond).abs() > 0.5 ||
+              pingFromPeerStats != null;
+
+      _voiceMicLevel = smoothedMicLevel;
+      _voiceOutboundBitrateKbps = bitrateKbps;
+      _voiceOutboundPacketsPerSecond = packetsPerSecond;
+      if (pingFromPeerStats != null) {
+        _voicePingMs = pingFromPeerStats;
+      }
+
+      if (hasMeaningfulChange) {
+        notifyListeners();
+      }
+    } finally {
+      _voiceDiagnosticsInFlight = false;
+    }
+  }
+
+  void _resetVoiceDiagnostics() {
+    _pendingVoicePings.clear();
+    _voicePingSequence = 0;
+    _voicePingMs = null;
+    _lastVoicePongAt = null;
+    _voiceMicLevel = 0;
+    _voiceOutboundBitrateKbps = 0;
+    _voiceOutboundPacketsPerSecond = 0;
+    _lastStatsBytesSent = null;
+    _lastStatsPacketsSent = null;
+    _lastStatsSnapshotAt = null;
+  }
+
+  String? _readStringMetric(Map<dynamic, dynamic> values, List<String> keys) {
+    for (final key in keys) {
+      final value = values[key];
+      if (value != null) {
+        final asString = value.toString();
+        if (asString.isNotEmpty) {
+          return asString;
+        }
+      }
+    }
+    return null;
+  }
+
+  int? _parseIntMetric(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is num) {
+      return value.round();
+    }
+    if (value is String) {
+      return int.tryParse(value);
+    }
+    return null;
+  }
+
+  double? _parseDoubleMetric(dynamic value) {
+    if (value is double) {
+      return value;
+    }
+    if (value is int) {
+      return value.toDouble();
+    }
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value);
+    }
+    return null;
   }
 
   void setReplyingTo(Message? message) {
@@ -795,6 +1127,8 @@ class AppState extends ChangeNotifier {
     _voiceSignalChannel?.sink.close();
     _voicePingTimer?.cancel();
     _voicePingTimer = null;
+    _voiceDiagnosticsTimer?.cancel();
+    _voiceDiagnosticsTimer = null;
 
     for (final peerConnection in _peerConnections.values) {
       peerConnection.onIceCandidate = null;
@@ -813,7 +1147,9 @@ class AppState extends ChangeNotifier {
     }
 
     _peerConnections.clear();
+    _peerConnectionStates.clear();
     _remoteStreams.clear();
+    _pendingVoicePings.clear();
     _localStream = null;
     scrollController.dispose();
     _highlightTimer?.cancel();

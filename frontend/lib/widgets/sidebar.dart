@@ -3,9 +3,46 @@ import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
+import '../screens/voice_diagnostics_screen.dart';
 
 class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
+
+  String _pingText(int? pingMs) {
+    if (pingMs == null) {
+      return "-- ms";
+    }
+    return "$pingMs ms";
+  }
+
+  Color _pingColor(int? pingMs) {
+    if (pingMs == null) {
+      return Colors.grey;
+    }
+    if (pingMs <= 90) {
+      return Colors.greenAccent;
+    }
+    if (pingMs <= 180) {
+      return Colors.amberAccent;
+    }
+    return Colors.redAccent;
+  }
+
+  Color _micLevelColor(AppState state, double micLevel) {
+    if (!state.hasLocalAudioTrack || !state.isLocalMicTrackEnabled) {
+      return Colors.grey;
+    }
+    if (state.isSelfMuted) {
+      return Colors.redAccent;
+    }
+    if (micLevel > 0.7) {
+      return Colors.greenAccent;
+    }
+    if (micLevel > 0.35) {
+      return Colors.lightGreenAccent;
+    }
+    return Colors.blueAccent;
+  }
 
   void _showCreateChannelDialog(
     BuildContext context,
@@ -215,7 +252,49 @@ class Sidebar extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color:
+                              _pingColor(state.voicePingMs).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          _pingText(state.voicePingMs),
+                          style: TextStyle(
+                            color: _pingColor(state.voicePingMs),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
                     ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    "Signal: ${state.voiceSignalStatusLabel}",
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      minHeight: 8,
+                      value: state.voiceMicLevel.clamp(0.0, 1.0),
+                      backgroundColor: const Color(0xFF2F3136),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        _micLevelColor(
+                          state,
+                          state.voiceMicLevel,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    "Mic input ${(state.voiceMicLevel.clamp(0.0, 1.0) * 100).round()}%",
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -233,6 +312,21 @@ class Sidebar extends StatelessWidget {
                             side: const BorderSide(color: Color(0xFF4F545C)),
                           ),
                         ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.analytics_outlined,
+                          color: Colors.lightBlueAccent,
+                        ),
+                        onPressed: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const VoiceDiagnosticsScreen(),
+                            ),
+                          );
+                        },
+                        tooltip: "Voice diagnostics",
                       ),
                       const SizedBox(width: 8),
                       IconButton(

@@ -465,7 +465,14 @@ async def voice_websocket_endpoint(
                 )
 
             elif msg_type == "ping":
-                await voice_manager.send_to_user(voice_channel_id, user_id, {"type": "pong"})
+                pong_payload: Dict[str, Any] = {"type": "pong"}
+                ping_id = data_json.get("ping_id")
+                if ping_id is not None:
+                    try:
+                        pong_payload["ping_id"] = int(ping_id)
+                    except (TypeError, ValueError):
+                        pass
+                await voice_manager.send_to_user(voice_channel_id, user_id, pong_payload)
 
     except WebSocketDisconnect as disconnect_event:
         logger.info(
