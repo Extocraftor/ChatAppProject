@@ -406,30 +406,36 @@ class _SidebarState extends State<Sidebar> {
                 ...state.channels.map((channel) {
                   final isActive = state.activeChannel?.id == channel.id;
                   final canDeleteChannel = state.canDeleteTextChannel(channel);
-                  return ListTile(
-                    dense: true,
-                    leading: const Text("#",
-                        style: TextStyle(fontSize: 20, color: Colors.grey)),
-                    title: Text(
-                      channel.name,
-                      style: TextStyle(
-                          color: isActive ? Colors.white : Colors.grey),
+                  return Material(
+                    type: MaterialType.transparency,
+                    child: ListTile(
+                      dense: true,
+                      leading: const Text("#",
+                          style: TextStyle(fontSize: 20, color: Colors.grey)),
+                      title: Text(
+                        channel.name,
+                        style: TextStyle(
+                            color: isActive ? Colors.white : Colors.grey),
+                      ),
+                      onTap: () => state.selectChannel(channel),
+                      selected: isActive,
+                      selectedTileColor: const Color(0xFF40444B),
+                      trailing: canDeleteChannel
+                          ? IconButton(
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                size: 18,
+                                color: Colors.redAccent,
+                              ),
+                              tooltip: "Delete channel",
+                              onPressed: () => _showDeleteTextChannelDialog(
+                                context,
+                                state,
+                                channel,
+                              ),
+                            )
+                          : null,
                     ),
-                    onTap: () => state.selectChannel(channel),
-                    selected: isActive,
-                    selectedTileColor: const Color(0xFF40444B),
-                    trailing: canDeleteChannel
-                        ? IconButton(
-                            icon: const Icon(
-                              Icons.delete_outline,
-                              size: 18,
-                              color: Colors.redAccent,
-                            ),
-                            tooltip: "Delete channel",
-                            onPressed: () =>
-                                _showDeleteTextChannelDialog(context, state, channel),
-                          )
-                        : null,
                   );
                 }),
                 const SizedBox(height: 10),
@@ -511,26 +517,29 @@ class _SidebarState extends State<Sidebar> {
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      ListTile(
-                        dense: true,
-                        leading: Icon(
-                          isActive ? Icons.volume_up : Icons.volume_mute,
-                          size: 20,
-                          color: isActive ? Colors.white : Colors.grey,
+                      Material(
+                        type: MaterialType.transparency,
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(
+                            isActive ? Icons.volume_up : Icons.volume_mute,
+                            size: 20,
+                            color: isActive ? Colors.white : Colors.grey,
+                          ),
+                          title: Text(
+                            channel.name,
+                            style: TextStyle(
+                                color: isActive ? Colors.white : Colors.grey),
+                          ),
+                          subtitle: isActive
+                              ? Text("${participants.length} connected")
+                              : null,
+                          trailing: trailing,
+                          selected: isActive,
+                          selectedTileColor: const Color(0xFF40444B),
+                          onTap: () =>
+                              _handleVoiceChannelTap(context, state, channel),
                         ),
-                        title: Text(
-                          channel.name,
-                          style: TextStyle(
-                              color: isActive ? Colors.white : Colors.grey),
-                        ),
-                        subtitle: isActive
-                            ? Text("${participants.length} connected")
-                            : null,
-                        trailing: trailing,
-                        selected: isActive,
-                        selectedTileColor: const Color(0xFF40444B),
-                        onTap: () =>
-                            _handleVoiceChannelTap(context, state, channel),
                       ),
                       if (isActive && participants.isNotEmpty)
                         ...participants
