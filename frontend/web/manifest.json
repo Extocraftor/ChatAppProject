@@ -1,11 +1,11 @@
 {
-    "name": "chat_app_frontend",
-    "short_name": "chat_app_frontend",
+    "name": "Harmony",
+    "short_name": "Harmony",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Harmony chat client.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
@@ -33,3 +33,4 @@
         }
     ]
 }
+

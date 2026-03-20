@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "chat_app_frontend" "\0"
+            VALUE "FileDescription", "Harmony" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "chat_app_frontend" "\0"
+            VALUE "InternalName", "Harmony" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "chat_app_frontend.exe" "\0"
-            VALUE "ProductName", "chat_app_frontend" "\0"
+            VALUE "OriginalFilename", "Harmony.exe" "\0"
+            VALUE "ProductName", "Harmony" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
@@ -119,3 +119,4 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
+

@@ -8,19 +8,19 @@ void main() {
   runApp(
     ChangeNotifierProvider(
       create: (context) => AppState(),
-      child: const DiscordCloneApp(),
+      child: const HarmonyApp(),
     ),
   );
 }
 
-class DiscordCloneApp extends StatelessWidget {
-  const DiscordCloneApp({super.key});
+class HarmonyApp extends StatelessWidget {
+  const HarmonyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Discord Clone',
+      title: 'Harmony',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF36393F),
         primaryColor: const Color(0xFF5865F2),
@@ -39,3 +39,4 @@ class DiscordCloneApp extends StatelessWidget {
     );
   }
 }
+

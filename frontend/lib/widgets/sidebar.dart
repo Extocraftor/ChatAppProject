@@ -389,7 +389,7 @@ class _SidebarState extends State<Sidebar> {
               border: Border(bottom: BorderSide(color: Color(0xFF202225))),
             ),
             child: const Text(
-              "Exto Chat",
+              "Harmony",
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
             ),
           ),
@@ -715,3 +715,4 @@ class _AnimatedMicInputLevel extends StatelessWidget {
     );
   }
 }
+
