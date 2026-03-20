@@ -891,7 +891,8 @@ def resolve_media(url: str) -> ResolvedMedia:
     except DownloadError as exc:
         if is_youtube_host(parsed.netloc):
             raise MusicBotError(
-                "Unable to extract audio from that YouTube URL."
+                "Unable to extract audio from that YouTube URL: "
+                f"{summarize_download_error(exc)}"
             ) from exc
         return ResolvedMedia(
             original_url=url,
@@ -983,6 +984,8 @@ def extract_stream_url(info: dict[str, object]) -> str | None:
 
 def normalize_media_url(url: str) -> str:
     normalized = url.strip()
+    normalized = normalized.strip("<>")
+    normalized = normalized.strip("\"'")
     if "://" in normalized:
         return normalized
 
@@ -1009,6 +1012,14 @@ def is_youtube_host(host: str) -> bool:
         "youtu.be",
         "www.youtu.be",
     }
+
+
+def summarize_download_error(exc: DownloadError) -> str:
+    message = str(exc).strip()
+    if message.startswith("ERROR: "):
+        message = message[len("ERROR: ") :]
+    message = " ".join(message.split())
+    return message or "unknown extractor error"
 
 
 def format_has_audio(media_format: dict[str, object]) -> bool:
