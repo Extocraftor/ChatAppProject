@@ -10,7 +10,6 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Awaitable, Callable, Deque
 from urllib.parse import urlparse
 
@@ -57,12 +56,6 @@ class ResolvedMedia:
     duration_seconds: int | None = None
     is_live: bool = False
     headers: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class YTDLPAuthSource:
-    label: str
-    options: dict[str, object]
 
 
 @dataclass(slots=True)
@@ -893,15 +886,26 @@ def resolve_media(url: str) -> ResolvedMedia:
     if parsed.scheme not in {"http", "https"}:
         raise MusicBotError("The play command needs a full http or https URL.")
 
+    ydl_options = build_ydl_options(parsed)
+
     try:
-        info = extract_media_info(url, parsed)
-    except MusicBotError:
-        raise
+        with YoutubeDL(ydl_options) as ydl:
+            info = ydl.extract_info(url, download=False)
     except DownloadError as exc:
         if is_youtube_host(parsed.netloc):
             error_message = summarize_download_error(exc)
             if is_youtube_auth_error(error_message):
-                error_message = build_missing_youtube_cookie_guidance(error_message)
+                if has_configured_youtube_cookies():
+                    error_message = (
+                        f"{error_message} Check the configured YouTube cookie source and "
+                        "make sure the signed-in browser session can open this video."
+                    )
+                else:
+                    error_message = (
+                        f"{error_message} Configure MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER "
+                        "(for example: edge, chrome:Default, or firefox) or "
+                        "MUSIC_BOT_YTDLP_COOKIES_FILE to pass YouTube cookies."
+                    )
             raise MusicBotError(
                 f"Unable to extract audio from that YouTube URL: {error_message}"
             ) from exc
@@ -993,51 +997,7 @@ def extract_stream_url(info: dict[str, object]) -> str | None:
     return None
 
 
-def extract_media_info(url: str, parsed_url) -> object:
-    base_options = build_base_ydl_options()
-    if not is_youtube_host(parsed_url.netloc):
-        return extract_info_with_options(url, base_options)
-
-    try:
-        return extract_info_with_options(url, base_options)
-    except DownloadError as exc:
-        initial_message = summarize_download_error(exc)
-        if not is_youtube_auth_error(initial_message):
-            raise
-
-    auth_sources = build_youtube_auth_sources()
-    if not auth_sources:
-        raise MusicBotError(
-            "Unable to extract audio from that YouTube URL: "
-            f"{build_missing_youtube_cookie_guidance(initial_message)}"
-        )
-
-    attempt_failures: list[str] = []
-    for auth_source in auth_sources:
-        try:
-            auth_options = dict(base_options)
-            auth_options.update(auth_source.options)
-            return extract_info_with_options(url, auth_options)
-        except DownloadError as exc:
-            attempt_failures.append(
-                f"{auth_source.label}: {summarize_download_error(exc)}"
-            )
-
-    attempted_labels = ", ".join(source.label for source in auth_sources)
-    failure_detail = attempt_failures[-1] if attempt_failures else initial_message
-    raise MusicBotError(
-        "Unable to extract audio from that YouTube URL: "
-        f"{initial_message} Tried browser cookies from {attempted_labels}, but none "
-        f"worked. Last error: {failure_detail}"
-    )
-
-
-def extract_info_with_options(url: str, ydl_options: dict[str, object]) -> object:
-    with YoutubeDL(ydl_options) as ydl:
-        return ydl.extract_info(url, download=False)
-
-
-def build_base_ydl_options() -> dict[str, object]:
+def build_ydl_options(parsed_url) -> dict[str, object]:
     options: dict[str, object] = {
         "format": "bestaudio/best",
         "noplaylist": True,
@@ -1047,14 +1007,9 @@ def build_base_ydl_options() -> dict[str, object]:
         "skip_download": True,
         "socket_timeout": 15,
     }
+    if is_youtube_host(parsed_url.netloc):
+        options.update(build_youtube_auth_options())
     return options
-
-
-def build_youtube_auth_sources() -> list[YTDLPAuthSource]:
-    configured_options = build_youtube_auth_options()
-    if configured_options:
-        return [YTDLPAuthSource(label="the configured cookie source", options=configured_options)]
-    return detect_local_browser_auth_sources()
 
 
 def build_youtube_auth_options() -> dict[str, object]:
@@ -1071,59 +1026,6 @@ def build_youtube_auth_options() -> dict[str, object]:
         )
 
     return options
-
-
-def detect_local_browser_auth_sources() -> list[YTDLPAuthSource]:
-    sources: list[YTDLPAuthSource] = []
-    local_app_data = Path(os.getenv("LOCALAPPDATA", ""))
-    roaming_app_data = Path(os.getenv("APPDATA", ""))
-
-    edge_default = local_app_data / "Microsoft" / "Edge" / "User Data" / "Default"
-    if edge_default.is_dir():
-        sources.append(
-            YTDLPAuthSource(
-                label="Edge",
-                options={"cookiesfrombrowser": ("edge", "Default", None, None)},
-            )
-        )
-
-    chrome_default = local_app_data / "Google" / "Chrome" / "User Data" / "Default"
-    if chrome_default.is_dir():
-        sources.append(
-            YTDLPAuthSource(
-                label="Chrome",
-                options={"cookiesfrombrowser": ("chrome", "Default", None, None)},
-            )
-        )
-
-    firefox_profiles_dir = roaming_app_data / "Mozilla" / "Firefox" / "Profiles"
-    firefox_profile = pick_firefox_profile(firefox_profiles_dir)
-    if firefox_profile is not None:
-        sources.append(
-            YTDLPAuthSource(
-                label="Firefox",
-                options={"cookiesfrombrowser": ("firefox", str(firefox_profile), None, None)},
-            )
-        )
-
-    return sources
-
-
-def pick_firefox_profile(profiles_dir: Path) -> Path | None:
-    if not profiles_dir.is_dir():
-        return None
-
-    profile_dirs = [path for path in profiles_dir.iterdir() if path.is_dir()]
-    if not profile_dirs:
-        return None
-
-    preferred_suffixes = (".default-release", ".default")
-    for suffix in preferred_suffixes:
-        for profile_dir in profile_dirs:
-            if profile_dir.name.endswith(suffix):
-                return profile_dir
-
-    return sorted(profile_dirs)[0]
 
 
 def resolve_cookie_file_path(raw_path: str) -> str:
@@ -1213,30 +1115,6 @@ def has_configured_youtube_cookies() -> bool:
     return bool(
         os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
         or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
-    )
-
-
-def build_missing_youtube_cookie_guidance(error_message: str) -> str:
-    if has_configured_youtube_cookies():
-        return (
-            f"{error_message} Check the configured YouTube cookie source and make sure "
-            "the signed-in browser session can open this video."
-        )
-
-    auto_sources = detect_local_browser_auth_sources()
-    if auto_sources:
-        available_sources = ", ".join(source.label for source in auto_sources)
-        return (
-            f"{error_message} The backend will retry local browser cookies from "
-            f"{available_sources}, but those sources were unavailable or not signed in. "
-            "If needed, explicitly set MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER or "
-            "MUSIC_BOT_YTDLP_COOKIES_FILE."
-        )
-
-    return (
-        f"{error_message} Configure MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER "
-        "(for example: edge, chrome:Default, or firefox) or "
-        "MUSIC_BOT_YTDLP_COOKIES_FILE to pass YouTube cookies."
     )
 
 
