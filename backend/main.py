@@ -1,12 +1,19 @@
+import asyncio
+import json
+import logging
+import os
+import re
+from typing import Any, Dict, List
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
-from typing import Any, Dict, List
-import json
-import os
-import logging
 
+try:
+    import yt_dlp
+except Exception:  # pragma: no cover - optional dependency at runtime
+    yt_dlp = None
 from database import SessionLocal, engine, get_db
 import models, schemas
 from passlib.context import CryptContext
@@ -27,6 +34,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
+PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
+YOUTUBE_URL_PATTERN = re.compile(
+    r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$",
+    re.IGNORECASE,
+)
 
 
 def _parse_username_set(env_name: str) -> set[str]:
@@ -229,6 +241,12 @@ class VoiceConnectionManager:
             self.mute_states[channel_id] = {}
         self.mute_states[channel_id][user_id] = is_muted
 
+    def find_channel_for_user(self, user_id: int) -> int | None:
+        for channel_id, channel_connections in self.active_connections.items():
+            if user_id in channel_connections:
+                return channel_id
+        return None
+
     async def send_to_user(self, channel_id: int, user_id: int, payload: Dict[str, Any]):
         channel_connections = self.active_connections.get(channel_id, {})
         websocket = channel_connections.get(user_id)
@@ -262,6 +280,73 @@ manager = ConnectionManager()
 voice_manager = VoiceConnectionManager()
 
 
+async def _send_music_bot_notice(channel_id: int, content: str) -> None:
+    await manager.broadcast(
+        json.dumps(
+            {
+                "type": "music_bot_notice",
+                "content": content,
+            }
+        ),
+        channel_id,
+    )
+
+
+async def _handle_music_play_command(
+    channel_id: int,
+    user_id: int,
+    username: str,
+    content: Any,
+) -> None:
+    if not isinstance(content, str):
+        return
+
+    command_match = PLAY_COMMAND_PATTERN.match(content.strip())
+    if not command_match:
+        return
+
+    raw_url = (command_match.group("url") or "").strip().strip("<>")
+    if not raw_url:
+        await _send_music_bot_notice(channel_id, "Usage: play <youtube_url>")
+        return
+
+    if not YOUTUBE_URL_PATTERN.match(raw_url):
+        await _send_music_bot_notice(channel_id, "Only YouTube links are supported for now.")
+        return
+
+    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+    if voice_channel_id is None:
+        await _send_music_bot_notice(
+            channel_id,
+            "Join a voice channel first, then use play <youtube_url>.",
+        )
+        return
+
+    try:
+        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, raw_url)
+    except Exception:
+        logger.exception("music command failed user=%s url=%s", user_id, raw_url)
+        await _send_music_bot_notice(channel_id, "I couldn't load that YouTube link.")
+        return
+
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "music_play",
+            "title": title,
+            "source_url": raw_url,
+            "stream_url": stream_url,
+            "requested_by_user_id": user_id,
+            "requested_by_username": username,
+        },
+    )
+
+    await _send_music_bot_notice(
+        channel_id,
+        f"Now playing in voice: {title}",
+    )
+
+
 def _resolve_user_role(username: str, db: Session) -> str:
     normalized_username = username.strip().lower()
     if normalized_username in ADMIN_USERNAMES:
@@ -285,6 +370,57 @@ def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
     if not actor_user:
         raise HTTPException(status_code=404, detail="Actor user not found")
     return actor_user
+
+
+def _build_ytdlp_options() -> Dict[str, Any]:
+    options: Dict[str, Any] = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    cookies_file = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE")
+    if cookies_file:
+        options["cookiefile"] = cookies_file
+
+    cookies_from_browser = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER")
+    if cookies_from_browser:
+        browser, _, profile = cookies_from_browser.partition(":")
+        browser = browser.strip()
+        profile = profile.strip()
+        if browser and profile:
+            options["cookiesfrombrowser"] = (browser, None, None, profile)
+        elif browser:
+            options["cookiesfrombrowser"] = (browser,)
+
+    return options
+
+
+def _extract_youtube_stream(url: str) -> tuple[str, str]:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed on the server.")
+
+    with yt_dlp.YoutubeDL(_build_ytdlp_options()) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if info is None:
+        raise RuntimeError("No media info returned by yt-dlp.")
+
+    if "entries" in info:
+        entries = info.get("entries") or []
+        info = next((entry for entry in entries if entry), None)
+
+    if info is None:
+        raise RuntimeError("No playable entry found in URL.")
+
+    title = str(info.get("title") or "Unknown title")
+    stream_url = info.get("url")
+    if not isinstance(stream_url, str) or not stream_url:
+        raise RuntimeError("Could not resolve stream URL.")
+
+    return title, stream_url
 
 
 # --- REST ENDPOINTS ---
@@ -585,6 +721,13 @@ async def websocket_endpoint(
                     continue
 
                 await manager.broadcast(broadcast_msg, channel_id)
+                if msg_type == "new_message":
+                    await _handle_music_play_command(
+                        channel_id=channel_id,
+                        user_id=user_id,
+                        username=username,
+                        content=content,
+                    )
 
             except json.JSONDecodeError:
                 db_message = models.Message(content=data_str, user_id=user_id, channel_id=channel_id)
@@ -602,6 +745,12 @@ async def websocket_endpoint(
                     }
                 )
                 await manager.broadcast(broadcast_msg, channel_id)
+                await _handle_music_play_command(
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    username=username,
+                    content=data_str,
+                )
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
