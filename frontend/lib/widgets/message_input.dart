@@ -94,9 +94,7 @@ class _MessageInputState extends State<MessageInput> {
             onSubmitted: (_) => _submit(),
             autofocus: true,
             decoration: InputDecoration(
-              hintText: editingMessage != null
-                  ? "Edit message"
-                  : "Message #${activeChannel?.name ?? ''} or play <url>",
+              hintText: editingMessage != null ? "Edit message" : "Message #${activeChannel?.name ?? ''}",
               filled: true,
               fillColor: const Color(0xFF40444B),
               border: OutlineInputBorder(
@@ -111,20 +109,6 @@ class _MessageInputState extends State<MessageInput> {
               ),
             ),
           ),
-          if (editingMessage == null)
-            const Padding(
-              padding: EdgeInsets.only(top: 8),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  "Music commands: play <url>, skip, stop, queue",
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                  ),
-                ),
-              ),
-            ),
           const SizedBox(height: 16),
         ],
       ),

@@ -1,21 +1,14 @@
-import asyncio
-import json
-import logging
-import os
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
 from typing import Any, Dict, List
+import json
+import os
+import logging
 
 from database import SessionLocal, engine, get_db
 import models, schemas
-from music_bot import (
-    MusicBotError,
-    MusicBotManager,
-    build_default_signal_base_ws_url,
-)
 from passlib.context import CryptContext
 
 # Password hashing configuration
@@ -34,7 +27,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
-MUSIC_BOT_DEFAULT_USERNAME = os.getenv("MUSIC_BOT_USERNAME", "Music Bot")
 
 
 def _parse_username_set(env_name: str) -> set[str]:
@@ -108,35 +100,10 @@ def _seed_existing_user_roles() -> None:
         db.close()
 
 
-def _ensure_music_bot_user() -> tuple[int, str]:
-    db = SessionLocal()
-    try:
-        existing_user = (
-            db.query(models.User)
-            .filter(models.User.username == MUSIC_BOT_DEFAULT_USERNAME)
-            .first()
-        )
-        if existing_user:
-            return existing_user.id, existing_user.username
-
-        bot_user = models.User(
-            username=MUSIC_BOT_DEFAULT_USERNAME,
-            hashed_password=get_password_hash(os.urandom(24).hex()),
-            role=ROLE_MEMBER,
-        )
-        db.add(bot_user)
-        db.commit()
-        db.refresh(bot_user)
-        return bot_user.id, bot_user.username
-    finally:
-        db.close()
-
-
 # Create all tables on startup
 models.Base.metadata.create_all(bind=engine)
 _ensure_schema_columns()
 _seed_existing_user_roles()
-MUSIC_BOT_USER_ID, MUSIC_BOT_USERNAME = _ensure_music_bot_user()
 
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")
@@ -257,12 +224,6 @@ class VoiceConnectionManager:
             for user_id in usernames.keys()
         ]
 
-    def find_channel_for_user(self, user_id: int) -> int | None:
-        for channel_id, channel_connections in self.active_connections.items():
-            if user_id in channel_connections:
-                return channel_id
-        return None
-
     def update_mute_state(self, channel_id: int, user_id: int, is_muted: bool):
         if channel_id not in self.mute_states:
             self.mute_states[channel_id] = {}
@@ -299,180 +260,6 @@ class VoiceConnectionManager:
 
 manager = ConnectionManager()
 voice_manager = VoiceConnectionManager()
-
-
-def _build_new_message_payload(
-    db_message: models.Message,
-    *,
-    username: str,
-) -> str:
-    return json.dumps(
-        {
-            "type": "new_message",
-            "id": db_message.id,
-            "user_id": db_message.user_id,
-            "username": username,
-            "content": db_message.content,
-            "timestamp": str(db_message.timestamp),
-            "parent_id": db_message.parent_id,
-            "parent_username": db_message.parent_username,
-            "parent_content": db_message.parent_content,
-        }
-    )
-
-
-async def _post_backend_message(channel_id: int, user_id: int, username: str, content: str) -> None:
-    db = SessionLocal()
-    try:
-        db_message = models.Message(
-            content=content,
-            user_id=user_id,
-            channel_id=channel_id,
-        )
-        db.add(db_message)
-        db.commit()
-        db.refresh(db_message)
-        broadcast_msg = _build_new_message_payload(db_message, username=username)
-    except Exception:
-        db.rollback()
-        logger.exception(
-            "failed to persist backend-generated message channel=%s user=%s",
-            channel_id,
-            user_id,
-        )
-        return
-    finally:
-        db.close()
-
-    await manager.broadcast(broadcast_msg, channel_id)
-
-
-async def _post_music_bot_message(channel_id: int, content: str) -> None:
-    await _post_backend_message(
-        channel_id,
-        MUSIC_BOT_USER_ID,
-        MUSIC_BOT_USERNAME,
-        content,
-    )
-
-
-def _parse_music_command(content: str) -> tuple[str, str | None] | None:
-    stripped_content = content.strip()
-    if not stripped_content:
-        return None
-
-    normalized = stripped_content[1:] if stripped_content.startswith("/") else stripped_content
-    command, _, argument = normalized.partition(" ")
-    command = command.lower()
-    argument = argument.strip() or None
-
-    if command in {"play", "skip", "stop", "queue"}:
-        return command, argument
-    return None
-
-
-async def _handle_music_command(
-    *,
-    channel_id: int,
-    user_id: int,
-    username: str,
-    content: str,
-) -> None:
-    parsed_command = _parse_music_command(content)
-    if parsed_command is None:
-        return
-
-    command_name, argument = parsed_command
-    voice_channel_id = voice_manager.find_channel_for_user(user_id)
-
-    if command_name == "play":
-        if voice_channel_id is None:
-            await _post_music_bot_message(
-                channel_id,
-                "Join a voice channel first, then use `play <url>`.",
-            )
-            return
-        if argument is None:
-            await _post_music_bot_message(channel_id, "Usage: play <url>")
-            return
-
-        await music_bot_manager.enqueue(
-            voice_channel_id=voice_channel_id,
-            text_channel_id=channel_id,
-            url=argument,
-            requested_by_username=username,
-        )
-        return
-
-    if voice_channel_id is None:
-        await _post_music_bot_message(
-            channel_id,
-            "Join the voice channel first before controlling the bot.",
-        )
-        return
-
-    if command_name == "skip":
-        await music_bot_manager.skip(
-            voice_channel_id=voice_channel_id,
-            text_channel_id=channel_id,
-        )
-        return
-
-    if command_name == "stop":
-        await music_bot_manager.stop(
-            voice_channel_id=voice_channel_id,
-            text_channel_id=channel_id,
-        )
-        return
-
-    if command_name == "queue":
-        await music_bot_manager.describe_queue(
-            voice_channel_id=voice_channel_id,
-            text_channel_id=channel_id,
-        )
-
-
-def _schedule_music_command(
-    *,
-    channel_id: int,
-    user_id: int,
-    username: str,
-    content: str,
-) -> None:
-    if _parse_music_command(content) is None:
-        return
-
-    async def _runner() -> None:
-        try:
-            await _handle_music_command(
-                channel_id=channel_id,
-                user_id=user_id,
-                username=username,
-                content=content,
-            )
-        except MusicBotError as exc:
-            await _post_music_bot_message(channel_id, str(exc))
-        except Exception:
-            logger.exception(
-                "music command failed channel=%s user=%s content=%s",
-                channel_id,
-                user_id,
-                content,
-            )
-            await _post_music_bot_message(
-                channel_id,
-                "The music bot hit an unexpected error while handling that command.",
-            )
-
-    asyncio.create_task(_runner())
-
-
-music_bot_manager = MusicBotManager(
-    bot_user_id=MUSIC_BOT_USER_ID,
-    bot_username=MUSIC_BOT_USERNAME,
-    signal_base_ws_url=build_default_signal_base_ws_url(),
-    announce=_post_music_bot_message,
-)
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -739,9 +526,18 @@ async def websocket_endpoint(
                     db.commit()
                     db.refresh(db_message)
 
-                    broadcast_msg = _build_new_message_payload(
-                        db_message,
-                        username=username,
+                    broadcast_msg = json.dumps(
+                        {
+                            "type": "new_message",
+                            "id": db_message.id,
+                            "user_id": user_id,
+                            "username": username,
+                            "content": content,
+                            "timestamp": str(db_message.timestamp),
+                            "parent_id": db_message.parent_id,
+                            "parent_username": db_message.parent_username,
+                            "parent_content": db_message.parent_content,
+                        }
                     )
 
                 elif msg_type == "edit_message":
@@ -789,30 +585,23 @@ async def websocket_endpoint(
                     continue
 
                 await manager.broadcast(broadcast_msg, channel_id)
-                if msg_type == "new_message" and isinstance(content, str):
-                    _schedule_music_command(
-                        channel_id=channel_id,
-                        user_id=user_id,
-                        username=username,
-                        content=content,
-                    )
 
             except json.JSONDecodeError:
                 db_message = models.Message(content=data_str, user_id=user_id, channel_id=channel_id)
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
-                broadcast_msg = _build_new_message_payload(
-                    db_message,
-                    username=username,
+                broadcast_msg = json.dumps(
+                    {
+                        "type": "new_message",
+                        "id": db_message.id,
+                        "user_id": user_id,
+                        "username": username,
+                        "content": data_str,
+                        "timestamp": str(db_message.timestamp),
+                    }
                 )
                 await manager.broadcast(broadcast_msg, channel_id)
-                _schedule_music_command(
-                    channel_id=channel_id,
-                    user_id=user_id,
-                    username=username,
-                    content=data_str,
-                )
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)

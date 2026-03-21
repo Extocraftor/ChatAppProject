@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 websockets
-aiortc==1.14.0
 sqlalchemy
 psycopg2-binary
 pydantic
@@ -9,4 +8,3 @@ python-dotenv
 passlib[bcrypt]
 bcrypt==4.0.1
 gunicorn
-yt-dlp==2026.3.17
