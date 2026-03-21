@@ -96,7 +96,7 @@ class _MessageInputState extends State<MessageInput> {
             decoration: InputDecoration(
               hintText: editingMessage != null
                   ? "Edit message"
-                  : "Message #${activeChannel?.name ?? ''} or play <YouTube URL>",
+                  : "Message #${activeChannel?.name ?? ''} or play <url>",
               filled: true,
               fillColor: const Color(0xFF40444B),
               border: OutlineInputBorder(
@@ -117,7 +117,7 @@ class _MessageInputState extends State<MessageInput> {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  "Music commands: play <YouTube URL>, skip, stop, queue",
+                  "Music commands: play <url>, skip, stop, queue",
                   style: TextStyle(
                     fontSize: 12,
                     color: Colors.grey,

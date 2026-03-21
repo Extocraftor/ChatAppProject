@@ -870,7 +870,6 @@ def build_default_signal_base_ws_url() -> str:
 
 
 def resolve_media(url: str) -> ResolvedMedia:
-    url = normalize_media_url(url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise MusicBotError("The play command needs a full http or https URL.")
@@ -889,10 +888,6 @@ def resolve_media(url: str) -> ResolvedMedia:
         with YoutubeDL(ydl_options) as ydl:
             info = ydl.extract_info(url, download=False)
     except DownloadError as exc:
-        if is_youtube_host(parsed.netloc):
-            raise MusicBotError(
-                "Unable to extract audio from that YouTube URL."
-            ) from exc
         return ResolvedMedia(
             original_url=url,
             stream_url=url,
@@ -979,36 +974,6 @@ def extract_stream_url(info: dict[str, object]) -> str | None:
                 return format_url
 
     return None
-
-
-def normalize_media_url(url: str) -> str:
-    normalized = url.strip()
-    if "://" in normalized:
-        return normalized
-
-    possible_host = normalized.split("/", 1)[0].lower()
-    if is_youtube_host(possible_host):
-        return f"https://{normalized}"
-
-    return normalized
-
-
-def is_youtube_host(host: str) -> bool:
-    normalized_host = host.strip().lower()
-    if not normalized_host:
-        return False
-
-    if ":" in normalized_host:
-        normalized_host = normalized_host.split(":", 1)[0]
-
-    return normalized_host in {
-        "youtube.com",
-        "www.youtube.com",
-        "m.youtube.com",
-        "music.youtube.com",
-        "youtu.be",
-        "www.youtu.be",
-    }
 
 
 def format_has_audio(media_format: dict[str, object]) -> bool:
