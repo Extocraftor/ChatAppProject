@@ -17,6 +17,7 @@ class AppState extends ChangeNotifier {
   // static const String wsUrl = "ws://127.0.0.1:8000/ws";
   static const String baseUrl = "https://extochatapp.onrender.com";
   static const String wsUrl = "wss://extochatapp.onrender.com/ws";
+  static const int musicBotUserId = -9000;
 
   static const Map<String, dynamic> _rtcConfiguration = {
     'iceServers': [
@@ -201,6 +202,13 @@ class AppState extends ChangeNotifier {
       _voiceParticipantVolumes.remove(userId);
     } else {
       _voiceParticipantVolumes[userId] = normalized;
+    }
+
+    if (userId == musicBotUserId) {
+      final musicVolume = (normalized / 5.0).clamp(0.0, 1.0);
+      unawaited(_musicPlayer.setVolume(musicVolume));
+      notifyListeners();
+      return;
     }
 
     final renderer = _remoteAudioRenderers[userId];
@@ -896,7 +904,7 @@ class AppState extends ChangeNotifier {
         final participant = VoiceParticipant.fromJson(payload);
         voiceParticipants[participant.userId] = participant;
 
-        if (participant.userId != currentUser?.id) {
+        if (participant.userId != currentUser?.id && !participant.isBot) {
           await _createOfferForUser(participant.userId);
         }
 
@@ -930,6 +938,21 @@ class AppState extends ChangeNotifier {
 
       if (type == 'music_play') {
         await _handleMusicPlaySignal(payload);
+        return;
+      }
+
+      if (type == 'music_pause') {
+        await _musicPlayer.pause();
+        return;
+      }
+
+      if (type == 'music_resume') {
+        await _musicPlayer.resume();
+        return;
+      }
+
+      if (type == 'music_stop') {
+        await _musicPlayer.stop();
         return;
       }
 
@@ -967,8 +990,12 @@ class AppState extends ChangeNotifier {
 
     try {
       await _musicPlayer.stop();
+      final currentBotVolume = voiceParticipantVolumeFor(musicBotUserId);
+      await _musicPlayer.setVolume((currentBotVolume / 5.0).clamp(0.0, 1.0));
       await _musicPlayer.setSourceUrl(streamUrl);
       await _musicPlayer.resume();
+      voiceError = null;
+      notifyListeners();
     } catch (error) {
       voiceError = "Unable to start music playback: $error";
       notifyListeners();
