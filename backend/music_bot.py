@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 import os
-import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -21,19 +20,9 @@ from aiortc.sdp import candidate_from_sdp
 from av import AudioFrame
 from websockets.exceptions import ConnectionClosed
 from yt_dlp import DownloadError, YoutubeDL
-from yt_dlp.cookies import SUPPORTED_BROWSERS, SUPPORTED_KEYRINGS
 
 
 logger = logging.getLogger("music_bot")
-
-YTDLP_COOKIES_FROM_BROWSER_PATTERN = re.compile(
-    r"""(?x)
-        (?P<name>[^+:]+)
-        (?:\s*\+\s*(?P<keyring>[^:]+))?
-        (?:\s*:\s*(?!:)(?P<profile>.+?))?
-        (?:\s*::\s*(?P<container>.+))?
-    """
-)
 
 TextAnnouncer = Callable[[int, str], Awaitable[None]]
 SessionClosedCallback = Callable[[int, "MusicVoiceSession"], Awaitable[None] | None]
@@ -886,28 +875,24 @@ def resolve_media(url: str) -> ResolvedMedia:
     if parsed.scheme not in {"http", "https"}:
         raise MusicBotError("The play command needs a full http or https URL.")
 
-    ydl_options = build_ydl_options(parsed)
+    ydl_options = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
+        "skip_download": True,
+        "socket_timeout": 15,
+    }
 
     try:
         with YoutubeDL(ydl_options) as ydl:
             info = ydl.extract_info(url, download=False)
     except DownloadError as exc:
         if is_youtube_host(parsed.netloc):
-            error_message = summarize_download_error(exc)
-            if is_youtube_auth_error(error_message):
-                if has_configured_youtube_cookies():
-                    error_message = (
-                        f"{error_message} Check the configured YouTube cookie source and "
-                        "make sure the signed-in browser session can open this video."
-                    )
-                else:
-                    error_message = (
-                        f"{error_message} Configure MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER "
-                        "(for example: edge, chrome:Default, or firefox) or "
-                        "MUSIC_BOT_YTDLP_COOKIES_FILE to pass YouTube cookies."
-                    )
             raise MusicBotError(
-                f"Unable to extract audio from that YouTube URL: {error_message}"
+                "Unable to extract audio from that YouTube URL: "
+                f"{summarize_download_error(exc)}"
             ) from exc
         return ResolvedMedia(
             original_url=url,
@@ -997,80 +982,6 @@ def extract_stream_url(info: dict[str, object]) -> str | None:
     return None
 
 
-def build_ydl_options(parsed_url) -> dict[str, object]:
-    options: dict[str, object] = {
-        "format": "bestaudio/best",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-        "skip_download": True,
-        "socket_timeout": 15,
-    }
-    if is_youtube_host(parsed_url.netloc):
-        options.update(build_youtube_auth_options())
-    return options
-
-
-def build_youtube_auth_options() -> dict[str, object]:
-    options: dict[str, object] = {}
-
-    cookie_file = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
-    if cookie_file:
-        options["cookiefile"] = resolve_cookie_file_path(cookie_file)
-
-    cookies_from_browser = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
-    if cookies_from_browser:
-        options["cookiesfrombrowser"] = parse_cookies_from_browser_spec(
-            cookies_from_browser
-        )
-
-    return options
-
-
-def resolve_cookie_file_path(raw_path: str) -> str:
-    resolved_path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw_path)))
-    if not os.path.isfile(resolved_path):
-        raise MusicBotError(
-            "MUSIC_BOT_YTDLP_COOKIES_FILE must point to an existing Netscape cookies file."
-        )
-    return resolved_path
-
-
-def parse_cookies_from_browser_spec(
-    raw_value: str,
-) -> tuple[str, str | None, str | None, str | None]:
-    match = YTDLP_COOKIES_FROM_BROWSER_PATTERN.fullmatch(raw_value)
-    if match is None:
-        raise MusicBotError(
-            "MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER must look like "
-            "browser[+KEYRING][:PROFILE][::CONTAINER]."
-        )
-
-    browser_name, keyring, profile, container = match.group(
-        "name", "keyring", "profile", "container"
-    )
-    normalized_browser = browser_name.lower()
-    if normalized_browser not in SUPPORTED_BROWSERS:
-        supported_browsers = ", ".join(sorted(SUPPORTED_BROWSERS))
-        raise MusicBotError(
-            "Unsupported browser in MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER. "
-            f"Supported browsers: {supported_browsers}."
-        )
-
-    normalized_keyring = None
-    if keyring is not None:
-        normalized_keyring = keyring.upper()
-        if normalized_keyring not in SUPPORTED_KEYRINGS:
-            supported_keyrings = ", ".join(sorted(SUPPORTED_KEYRINGS))
-            raise MusicBotError(
-                "Unsupported keyring in MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER. "
-                f"Supported keyrings: {supported_keyrings}."
-            )
-
-    return normalized_browser, profile, normalized_keyring, container
-
-
 def normalize_media_url(url: str) -> str:
     normalized = url.strip()
     normalized = normalized.strip("<>")
@@ -1109,27 +1020,6 @@ def summarize_download_error(exc: DownloadError) -> str:
         message = message[len("ERROR: ") :]
     message = " ".join(message.split())
     return message or "unknown extractor error"
-
-
-def has_configured_youtube_cookies() -> bool:
-    return bool(
-        os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
-        or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
-    )
-
-
-def is_youtube_auth_error(message: str) -> bool:
-    normalized = message.lower()
-    return any(
-        snippet in normalized
-        for snippet in (
-            "sign in to confirm you're not a bot",
-            "sign in to confirm youre not a bot",
-            "use --cookies-from-browser",
-            "use --cookies",
-            "login required",
-        )
-    )
 
 
 def format_has_audio(media_format: dict[str, object]) -> bool:
