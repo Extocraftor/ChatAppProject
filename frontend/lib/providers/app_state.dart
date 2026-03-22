@@ -33,6 +33,12 @@ class AppState extends ChangeNotifier {
   List<VoiceChannel> voiceChannels = [];
   VoiceChannel? activeVoiceChannel;
   final Map<int, VoiceParticipant> voiceParticipants = {};
+  List<User> adminUsers = [];
+  User? selectedAdminUser;
+  UserChannelPermissions? selectedUserChannelPermissions;
+  bool adminUsersLoading = false;
+  bool adminPermissionsLoading = false;
+  String? adminPermissionsError;
   WebSocketChannel? _voiceSignalChannel;
   Timer? _voicePingTimer;
   MediaStream? _localStream;
@@ -158,6 +164,8 @@ class AppState extends ChangeNotifier {
       Map<String, String>.unmodifiable(_inputTestRawStats);
   Map<int, double> get voiceParticipantVolumes =>
       Map<int, double>.unmodifiable(_voiceParticipantVolumes);
+  bool get isAdmin => currentUser?.role.toLowerCase() == "admin";
+  bool get canDeleteAnyMessage => isAdmin;
   bool get canModerateChannels {
     final role = currentUser?.role.toLowerCase();
     return role == "admin" || role == "moderator";
@@ -244,6 +252,9 @@ class AppState extends ChangeNotifier {
 
       if (response.statusCode == 200) {
         currentUser = User.fromJson(jsonDecode(response.body));
+        if (!isAdmin) {
+          _clearAdminPermissionState(notify: false);
+        }
         await fetchChannels();
         await fetchVoiceChannels();
         await refreshAudioInputDevices(notify: false);
@@ -255,6 +266,215 @@ class AppState extends ChangeNotifier {
       return data['detail'] ?? "Login failed";
     } catch (_) {
       return "Connection error";
+    }
+  }
+
+  void _clearAdminPermissionState({bool notify = true}) {
+    adminUsers = [];
+    selectedAdminUser = null;
+    selectedUserChannelPermissions = null;
+    adminUsersLoading = false;
+    adminPermissionsLoading = false;
+    adminPermissionsError = null;
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> fetchAdminUsers({bool autoSelectFirst = true}) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      _clearAdminPermissionState();
+      return;
+    }
+
+    adminUsersLoading = true;
+    adminPermissionsError = null;
+    notifyListeners();
+
+    try {
+      final response = await http.get(
+        Uri.parse("$baseUrl/admin/users/?actor_user_id=$userId"),
+      );
+      if (response.statusCode != 200) {
+        adminPermissionsError = "Unable to load users (${response.statusCode})";
+        return;
+      }
+
+      final List data = jsonDecode(response.body);
+      adminUsers = data.map((item) => User.fromJson(item)).toList();
+      adminUsers.sort(
+        (a, b) => a.username.toLowerCase().compareTo(b.username.toLowerCase()),
+      );
+
+      final selectedId = selectedAdminUser?.id;
+      if (selectedId != null) {
+        final matched = adminUsers.where((user) => user.id == selectedId);
+        selectedAdminUser = matched.isNotEmpty ? matched.first : null;
+      }
+
+      if (autoSelectFirst) {
+        final nextUserId =
+            selectedAdminUser?.id ?? (adminUsers.isNotEmpty ? adminUsers.first.id : null);
+        if (nextUserId != null) {
+          await fetchAdminPermissionsForUser(nextUserId);
+        } else {
+          selectedUserChannelPermissions = null;
+        }
+      }
+    } catch (_) {
+      adminPermissionsError = "Unable to load users";
+    } finally {
+      adminUsersLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> fetchAdminPermissionsForUser(int targetUserId) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      return;
+    }
+
+    adminPermissionsLoading = true;
+    adminPermissionsError = null;
+    notifyListeners();
+
+    try {
+      final response = await http.get(
+        Uri.parse(
+          "$baseUrl/admin/users/$targetUserId/permissions?actor_user_id=$userId",
+        ),
+      );
+      if (response.statusCode != 200) {
+        adminPermissionsError =
+            "Unable to load permissions (${response.statusCode})";
+        return;
+      }
+
+      final payload = jsonDecode(response.body);
+      selectedUserChannelPermissions =
+          UserChannelPermissions.fromJson(payload);
+
+      final matched = adminUsers.where((user) => user.id == targetUserId);
+      if (matched.isNotEmpty) {
+        selectedAdminUser = matched.first;
+      } else {
+        selectedAdminUser = User(
+          id: selectedUserChannelPermissions!.userId,
+          username: selectedUserChannelPermissions!.username,
+          role: selectedUserChannelPermissions!.role,
+        );
+      }
+    } catch (_) {
+      adminPermissionsError = "Unable to load permissions";
+    } finally {
+      adminPermissionsLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> updateUserRoleAsAdmin(int targetUserId, String role) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      return false;
+    }
+
+    try {
+      final response = await http.patch(
+        Uri.parse("$baseUrl/users/$targetUserId/role?actor_user_id=$userId"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"role": role}),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+
+      final updatedUser = User.fromJson(jsonDecode(response.body));
+      final index = adminUsers.indexWhere((user) => user.id == targetUserId);
+      if (index != -1) {
+        adminUsers[index] = updatedUser;
+      }
+      if (selectedAdminUser?.id == targetUserId) {
+        selectedAdminUser = updatedUser;
+      }
+      if (selectedUserChannelPermissions?.userId == targetUserId) {
+        final current = selectedUserChannelPermissions!;
+        selectedUserChannelPermissions = UserChannelPermissions(
+          userId: current.userId,
+          username: current.username,
+          role: updatedUser.role,
+          textChannelPermissions: current.textChannelPermissions,
+          voiceChannelPermissions: current.voiceChannelPermissions,
+        );
+      }
+      if (currentUser?.id == targetUserId) {
+        currentUser = updatedUser;
+        if (!isAdmin) {
+          _clearAdminPermissionState(notify: false);
+        }
+      }
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> updateSelectedUserTextChannelPermission(
+    int channelId,
+    bool canView,
+  ) async {
+    return _updateSelectedUserPermissions(
+      textUpdates: {channelId: canView},
+    );
+  }
+
+  Future<bool> updateSelectedUserVoiceChannelPermission(
+    int channelId,
+    bool canView,
+  ) async {
+    return _updateSelectedUserPermissions(
+      voiceUpdates: {channelId: canView},
+    );
+  }
+
+  Future<bool> _updateSelectedUserPermissions({
+    Map<int, bool>? textUpdates,
+    Map<int, bool>? voiceUpdates,
+  }) async {
+    final userId = currentUser?.id;
+    final selected = selectedUserChannelPermissions;
+    if (userId == null || !isAdmin || selected == null) {
+      return false;
+    }
+
+    try {
+      final response = await http.patch(
+        Uri.parse(
+          "$baseUrl/admin/users/${selected.userId}/permissions?actor_user_id=$userId",
+        ),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "text_channel_permissions": textUpdates ?? <int, bool>{},
+          "voice_channel_permissions": voiceUpdates ?? <int, bool>{},
+        }),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+
+      selectedUserChannelPermissions =
+          UserChannelPermissions.fromJson(jsonDecode(response.body));
+
+      if (currentUser?.id == selected.userId) {
+        await fetchChannels();
+        await fetchVoiceChannels();
+      }
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -307,7 +527,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> fetchChannels() async {
-    final response = await http.get(Uri.parse("$baseUrl/channels/"));
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    final response = await http.get(
+      Uri.parse("$baseUrl/channels/?actor_user_id=$userId"),
+    );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       channels = data.map((c) => Channel.fromJson(c)).toList();
@@ -359,7 +586,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> fetchVoiceChannels() async {
-    final response = await http.get(Uri.parse("$baseUrl/voice-channels/"));
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    final response = await http.get(
+      Uri.parse("$baseUrl/voice-channels/?actor_user_id=$userId"),
+    );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       voiceChannels = data.map((c) => VoiceChannel.fromJson(c)).toList();
@@ -708,8 +942,16 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> fetchMessages(int channelId) async {
-    final response =
-        await http.get(Uri.parse("$baseUrl/channels/$channelId/messages/"));
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    final response = await http.get(
+      Uri.parse(
+        "$baseUrl/channels/$channelId/messages/?actor_user_id=$userId",
+      ),
+    );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       messages = data.map((m) => Message.fromJson(m)).toList();

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
+import '../screens/admin_permissions_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
 
 class Sidebar extends StatefulWidget {
@@ -397,6 +398,23 @@ class _SidebarState extends State<Sidebar> {
             child: ListView(
               padding: EdgeInsets.zero,
               children: [
+                if (state.isAdmin)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(
+                      Icons.admin_panel_settings_outlined,
+                      color: Colors.amberAccent,
+                    ),
+                    title: const Text("Admin Permissions"),
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const AdminPermissionsScreen(),
+                        ),
+                      );
+                    },
+                  ),
+                if (state.isAdmin) const Divider(height: 1, color: Color(0xFF202225)),
                 _sectionHeader(
                   title: "TEXT CHANNELS",
                   icon: Icons.tag,

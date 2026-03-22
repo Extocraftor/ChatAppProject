@@ -71,6 +71,7 @@ class _MessageItemState extends State<MessageItem> {
     final state = context.watch<AppState>();
     final isHighlighted = state.highlightedMessageId == widget.message.id;
     final isOwnMessage = state.currentUser?.id == widget.message.userId;
+    final canDeleteMessage = isOwnMessage || state.canDeleteAnyMessage;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
@@ -192,6 +193,8 @@ class _MessageItemState extends State<MessageItem> {
                           tooltip: "Edit",
                           constraints: const BoxConstraints(),
                         ),
+                      ],
+                      if (canDeleteMessage)
                         IconButton(
                           icon: const Icon(Icons.delete,
                               size: 18, color: Colors.redAccent),

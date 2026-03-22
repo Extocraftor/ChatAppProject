@@ -140,3 +140,73 @@ class Message {
     );
   }
 }
+
+class ChannelVisibilityPermission {
+  final int channelId;
+  final String channelName;
+  final bool canView;
+
+  ChannelVisibilityPermission({
+    required this.channelId,
+    required this.channelName,
+    required this.canView,
+  });
+
+  ChannelVisibilityPermission copyWith({
+    bool? canView,
+  }) {
+    return ChannelVisibilityPermission(
+      channelId: channelId,
+      channelName: channelName,
+      canView: canView ?? this.canView,
+    );
+  }
+
+  factory ChannelVisibilityPermission.fromJson(Map<String, dynamic> json) {
+    return ChannelVisibilityPermission(
+      channelId: json['channel_id'],
+      channelName: json['channel_name'] ?? "Unknown channel",
+      canView: json['can_view'] == true,
+    );
+  }
+}
+
+class UserChannelPermissions {
+  final int userId;
+  final String username;
+  final String role;
+  final List<ChannelVisibilityPermission> textChannelPermissions;
+  final List<ChannelVisibilityPermission> voiceChannelPermissions;
+
+  UserChannelPermissions({
+    required this.userId,
+    required this.username,
+    required this.role,
+    required this.textChannelPermissions,
+    required this.voiceChannelPermissions,
+  });
+
+  factory UserChannelPermissions.fromJson(Map<String, dynamic> json) {
+    final textPermissions =
+        (json['text_channel_permissions'] as List<dynamic>? ?? [])
+            .whereType<Map<dynamic, dynamic>>()
+            .map((item) => ChannelVisibilityPermission.fromJson(
+                  Map<String, dynamic>.from(item),
+                ))
+            .toList();
+    final voicePermissions =
+        (json['voice_channel_permissions'] as List<dynamic>? ?? [])
+            .whereType<Map<dynamic, dynamic>>()
+            .map((item) => ChannelVisibilityPermission.fromJson(
+                  Map<String, dynamic>.from(item),
+                ))
+            .toList();
+    return UserChannelPermissions(
+      userId: json['user_id'],
+      username: json['username'] ?? "Unknown user",
+      role: json['role'] ?? "member",
+      textChannelPermissions: textPermissions,
+      voiceChannelPermissions: voicePermissions,
+    );
+  }
+}

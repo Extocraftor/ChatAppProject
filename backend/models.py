@@ -1,4 +1,12 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -21,6 +29,16 @@ class User(Base):
         back_populates="creator",
         foreign_keys="VoiceChannel.creator_user_id",
     )
+    text_channel_permissions = relationship(
+        "TextChannelPermission",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    voice_channel_permissions = relationship(
+        "VoiceChannelPermission",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class Channel(Base):
@@ -35,6 +53,11 @@ class Channel(Base):
         back_populates="created_channels",
         foreign_keys=[creator_user_id],
     )
+    permissions = relationship(
+        "TextChannelPermission",
+        back_populates="channel",
+        cascade="all, delete-orphan",
+    )
 
 
 class VoiceChannel(Base):
@@ -48,6 +71,41 @@ class VoiceChannel(Base):
         back_populates="created_voice_channels",
         foreign_keys=[creator_user_id],
     )
+    permissions = relationship(
+        "VoiceChannelPermission",
+        back_populates="channel",
+        cascade="all, delete-orphan",
+    )
+
+
+class TextChannelPermission(Base):
+    __tablename__ = "text_channel_permissions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "channel_id", name="uq_text_channel_permissions_user_channel"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    channel_id = Column(Integer, ForeignKey("channels.id"), nullable=False, index=True)
+    can_view = Column(Boolean, nullable=False, default=True)
+
+    user = relationship("User", back_populates="text_channel_permissions")
+    channel = relationship("Channel", back_populates="permissions")
+
+
+class VoiceChannelPermission(Base):
+    __tablename__ = "voice_channel_permissions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "channel_id", name="uq_voice_channel_permissions_user_channel"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    channel_id = Column(Integer, ForeignKey("voice_channels.id"), nullable=False, index=True)
+    can_view = Column(Boolean, nullable=False, default=True)
+
+    user = relationship("User", back_populates="voice_channel_permissions")
+    channel = relationship("VoiceChannel", back_populates="permissions")
 
 
 class Message(Base):

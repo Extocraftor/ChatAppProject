@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 class MessageBase(BaseModel):
     content: str
@@ -78,3 +78,22 @@ class UserSchema(UserBase):
 
 class UserRoleUpdate(BaseModel):
     role: Literal["member", "moderator", "admin"]
+
+
+class ChannelVisibilityPermissionSchema(BaseModel):
+    channel_id: int
+    channel_name: str
+    can_view: bool
+
+
+class UserChannelPermissionsSchema(BaseModel):
+    user_id: int
+    username: str
+    role: str
+    text_channel_permissions: List[ChannelVisibilityPermissionSchema]
+    voice_channel_permissions: List[ChannelVisibilityPermissionSchema]
+
+
+class UserChannelPermissionsUpdate(BaseModel):
+    text_channel_permissions: Dict[int, bool] = {}
+    voice_channel_permissions: Dict[int, bool] = {}

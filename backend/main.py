@@ -430,11 +430,310 @@ def _is_staff(user: models.User) -> bool:
     return user.role in {ROLE_ADMIN, ROLE_MODERATOR}
 
 
+def _is_admin(user: models.User) -> bool:
+    return user.role == ROLE_ADMIN
+
+
 def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
     actor_user = db.query(models.User).filter(models.User.id == actor_user_id).first()
     if not actor_user:
         raise HTTPException(status_code=404, detail="Actor user not found")
     return actor_user
+
+
+def _ensure_admin_actor(db: Session, actor_user_id: int) -> models.User:
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    if not _is_admin(actor_user):
+        raise HTTPException(status_code=403, detail="Only admins can perform this action")
+    return actor_user
+
+
+def _ensure_text_channel_permissions_for_user(db: Session, user_id: int) -> None:
+    channel_ids = [row[0] for row in db.query(models.Channel.id).all()]
+    if not channel_ids:
+        return
+
+    existing_channel_ids = {
+        row[0]
+        for row in db.query(models.TextChannelPermission.channel_id)
+        .filter(models.TextChannelPermission.user_id == user_id)
+        .all()
+    }
+    missing_channel_ids = [
+        channel_id for channel_id in channel_ids if channel_id not in existing_channel_ids
+    ]
+    if not missing_channel_ids:
+        return
+
+    db.add_all(
+        [
+            models.TextChannelPermission(
+                user_id=user_id,
+                channel_id=channel_id,
+                can_view=True,
+            )
+            for channel_id in missing_channel_ids
+        ]
+    )
+    db.commit()
+
+
+def _ensure_voice_channel_permissions_for_user(db: Session, user_id: int) -> None:
+    channel_ids = [row[0] for row in db.query(models.VoiceChannel.id).all()]
+    if not channel_ids:
+        return
+
+    existing_channel_ids = {
+        row[0]
+        for row in db.query(models.VoiceChannelPermission.channel_id)
+        .filter(models.VoiceChannelPermission.user_id == user_id)
+        .all()
+    }
+    missing_channel_ids = [
+        channel_id for channel_id in channel_ids if channel_id not in existing_channel_ids
+    ]
+    if not missing_channel_ids:
+        return
+
+    db.add_all(
+        [
+            models.VoiceChannelPermission(
+                user_id=user_id,
+                channel_id=channel_id,
+                can_view=True,
+            )
+            for channel_id in missing_channel_ids
+        ]
+    )
+    db.commit()
+
+
+def _ensure_permissions_for_user(db: Session, user_id: int) -> None:
+    _ensure_text_channel_permissions_for_user(db, user_id)
+    _ensure_voice_channel_permissions_for_user(db, user_id)
+
+
+def _ensure_permissions_for_new_user(db: Session, user_id: int) -> None:
+    text_channel_ids = [row[0] for row in db.query(models.Channel.id).all()]
+    voice_channel_ids = [row[0] for row in db.query(models.VoiceChannel.id).all()]
+
+    if text_channel_ids:
+        db.add_all(
+            [
+                models.TextChannelPermission(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    can_view=True,
+                )
+                for channel_id in text_channel_ids
+            ]
+        )
+    if voice_channel_ids:
+        db.add_all(
+            [
+                models.VoiceChannelPermission(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    can_view=True,
+                )
+                for channel_id in voice_channel_ids
+            ]
+        )
+    db.commit()
+
+
+def _ensure_permissions_for_new_text_channel(db: Session, channel_id: int) -> None:
+    user_ids = [row[0] for row in db.query(models.User.id).all()]
+    if not user_ids:
+        return
+
+    existing_user_ids = {
+        row[0]
+        for row in db.query(models.TextChannelPermission.user_id)
+        .filter(models.TextChannelPermission.channel_id == channel_id)
+        .all()
+    }
+    missing_user_ids = [user_id for user_id in user_ids if user_id not in existing_user_ids]
+    if not missing_user_ids:
+        return
+
+    db.add_all(
+        [
+            models.TextChannelPermission(
+                user_id=user_id,
+                channel_id=channel_id,
+                can_view=True,
+            )
+            for user_id in missing_user_ids
+        ]
+    )
+    db.commit()
+
+
+def _ensure_permissions_for_new_voice_channel(db: Session, channel_id: int) -> None:
+    user_ids = [row[0] for row in db.query(models.User.id).all()]
+    if not user_ids:
+        return
+
+    existing_user_ids = {
+        row[0]
+        for row in db.query(models.VoiceChannelPermission.user_id)
+        .filter(models.VoiceChannelPermission.channel_id == channel_id)
+        .all()
+    }
+    missing_user_ids = [user_id for user_id in user_ids if user_id not in existing_user_ids]
+    if not missing_user_ids:
+        return
+
+    db.add_all(
+        [
+            models.VoiceChannelPermission(
+                user_id=user_id,
+                channel_id=channel_id,
+                can_view=True,
+            )
+            for user_id in missing_user_ids
+        ]
+    )
+    db.commit()
+
+
+def _backfill_default_channel_permissions() -> None:
+    db = SessionLocal()
+    try:
+        user_ids = [row[0] for row in db.query(models.User.id).all()]
+        text_channel_ids = [row[0] for row in db.query(models.Channel.id).all()]
+        voice_channel_ids = [row[0] for row in db.query(models.VoiceChannel.id).all()]
+
+        if user_ids and text_channel_ids:
+            existing_text_pairs = {
+                (row[0], row[1])
+                for row in db.query(
+                    models.TextChannelPermission.user_id,
+                    models.TextChannelPermission.channel_id,
+                ).all()
+            }
+            text_inserts = []
+            for user_id in user_ids:
+                for channel_id in text_channel_ids:
+                    if (user_id, channel_id) not in existing_text_pairs:
+                        text_inserts.append(
+                            models.TextChannelPermission(
+                                user_id=user_id,
+                                channel_id=channel_id,
+                                can_view=True,
+                            )
+                        )
+            if text_inserts:
+                db.add_all(text_inserts)
+
+        if user_ids and voice_channel_ids:
+            existing_voice_pairs = {
+                (row[0], row[1])
+                for row in db.query(
+                    models.VoiceChannelPermission.user_id,
+                    models.VoiceChannelPermission.channel_id,
+                ).all()
+            }
+            voice_inserts = []
+            for user_id in user_ids:
+                for channel_id in voice_channel_ids:
+                    if (user_id, channel_id) not in existing_voice_pairs:
+                        voice_inserts.append(
+                            models.VoiceChannelPermission(
+                                user_id=user_id,
+                                channel_id=channel_id,
+                                can_view=True,
+                            )
+                        )
+            if voice_inserts:
+                db.add_all(voice_inserts)
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to backfill channel permissions")
+    finally:
+        db.close()
+
+
+def _can_view_text_channel(db: Session, user: models.User, channel_id: int) -> bool:
+    if _is_admin(user):
+        return True
+
+    permission = (
+        db.query(models.TextChannelPermission)
+        .filter(
+            models.TextChannelPermission.user_id == user.id,
+            models.TextChannelPermission.channel_id == channel_id,
+        )
+        .first()
+    )
+    return permission.can_view if permission else True
+
+
+def _can_view_voice_channel(db: Session, user: models.User, channel_id: int) -> bool:
+    if _is_admin(user):
+        return True
+
+    permission = (
+        db.query(models.VoiceChannelPermission)
+        .filter(
+            models.VoiceChannelPermission.user_id == user.id,
+            models.VoiceChannelPermission.channel_id == channel_id,
+        )
+        .first()
+    )
+    return permission.can_view if permission else True
+
+
+def _build_user_channel_permissions_response(
+    db: Session,
+    target_user: models.User,
+) -> schemas.UserChannelPermissionsSchema:
+    _ensure_permissions_for_user(db, target_user.id)
+
+    text_channels = db.query(models.Channel).order_by(models.Channel.name.asc()).all()
+    voice_channels = (
+        db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+    )
+    text_permission_map = {
+        permission.channel_id: permission.can_view
+        for permission in db.query(models.TextChannelPermission)
+        .filter(models.TextChannelPermission.user_id == target_user.id)
+        .all()
+    }
+    voice_permission_map = {
+        permission.channel_id: permission.can_view
+        for permission in db.query(models.VoiceChannelPermission)
+        .filter(models.VoiceChannelPermission.user_id == target_user.id)
+        .all()
+    }
+
+    return schemas.UserChannelPermissionsSchema(
+        user_id=target_user.id,
+        username=target_user.username,
+        role=target_user.role,
+        text_channel_permissions=[
+            schemas.ChannelVisibilityPermissionSchema(
+                channel_id=channel.id,
+                channel_name=channel.name,
+                can_view=text_permission_map.get(channel.id, True),
+            )
+            for channel in text_channels
+        ],
+        voice_channel_permissions=[
+            schemas.ChannelVisibilityPermissionSchema(
+                channel_id=channel.id,
+                channel_name=channel.name,
+                can_view=voice_permission_map.get(channel.id, True),
+            )
+            for channel in voice_channels
+        ],
+    )
+
+
+_backfill_default_channel_permissions()
 
 
 def _build_ytdlp_options(
@@ -814,6 +1113,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
         raise HTTPException(status_code=400, detail="Error creating user")
+    _ensure_permissions_for_new_user(db, db_user.id)
     db.refresh(db_user)
     return db_user
 
@@ -838,10 +1138,110 @@ def update_user_role(
     if not target_user:
         raise HTTPException(status_code=404, detail="Target user not found")
 
+    if (
+        target_user.role == ROLE_ADMIN
+        and role_update.role != ROLE_ADMIN
+        and db.query(models.User)
+        .filter(models.User.role == ROLE_ADMIN)
+        .count()
+        <= 1
+    ):
+        raise HTTPException(status_code=400, detail="Cannot demote the last admin")
+
     target_user.role = role_update.role
     db.commit()
     db.refresh(target_user)
     return target_user
+
+
+@app.get("/admin/users/", response_model=List[schemas.UserSchema])
+def admin_list_users(actor_user_id: int, db: Session = Depends(get_db)):
+    _ensure_admin_actor(db, actor_user_id)
+    return db.query(models.User).order_by(models.User.username.asc()).all()
+
+
+@app.get(
+    "/admin/users/{target_user_id}/permissions",
+    response_model=schemas.UserChannelPermissionsSchema,
+)
+def admin_get_user_permissions(
+    target_user_id: int,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    _ensure_admin_actor(db, actor_user_id)
+    target_user = db.query(models.User).filter(models.User.id == target_user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found")
+
+    return _build_user_channel_permissions_response(db, target_user)
+
+
+@app.patch(
+    "/admin/users/{target_user_id}/permissions",
+    response_model=schemas.UserChannelPermissionsSchema,
+)
+def admin_update_user_permissions(
+    target_user_id: int,
+    permission_update: schemas.UserChannelPermissionsUpdate,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    _ensure_admin_actor(db, actor_user_id)
+    target_user = db.query(models.User).filter(models.User.id == target_user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found")
+
+    _ensure_permissions_for_user(db, target_user.id)
+
+    if permission_update.text_channel_permissions:
+        valid_channel_ids = {
+            row[0] for row in db.query(models.Channel.id).all()
+        }
+        for channel_id, can_view in permission_update.text_channel_permissions.items():
+            if channel_id not in valid_channel_ids:
+                raise HTTPException(status_code=404, detail=f"Text channel {channel_id} not found")
+            permission = (
+                db.query(models.TextChannelPermission)
+                .filter(
+                    models.TextChannelPermission.user_id == target_user.id,
+                    models.TextChannelPermission.channel_id == channel_id,
+                )
+                .first()
+            )
+            if not permission:
+                permission = models.TextChannelPermission(
+                    user_id=target_user.id,
+                    channel_id=channel_id,
+                )
+                db.add(permission)
+            permission.can_view = bool(can_view)
+
+    if permission_update.voice_channel_permissions:
+        valid_voice_channel_ids = {
+            row[0] for row in db.query(models.VoiceChannel.id).all()
+        }
+        for channel_id, can_view in permission_update.voice_channel_permissions.items():
+            if channel_id not in valid_voice_channel_ids:
+                raise HTTPException(status_code=404, detail=f"Voice channel {channel_id} not found")
+            permission = (
+                db.query(models.VoiceChannelPermission)
+                .filter(
+                    models.VoiceChannelPermission.user_id == target_user.id,
+                    models.VoiceChannelPermission.channel_id == channel_id,
+                )
+                .first()
+            )
+            if not permission:
+                permission = models.VoiceChannelPermission(
+                    user_id=target_user.id,
+                    channel_id=channel_id,
+                )
+                db.add(permission)
+            permission.can_view = bool(can_view)
+
+    db.commit()
+    return _build_user_channel_permissions_response(db, target_user)
 
 
 @app.post("/login/", response_model=schemas.UserSchema)
@@ -871,12 +1271,33 @@ def create_channel(
     db.add(db_channel)
     db.commit()
     db.refresh(db_channel)
+    _ensure_permissions_for_new_text_channel(db, db_channel.id)
     return db_channel
 
 
 @app.get("/channels/", response_model=List[schemas.ChannelSchema])
-def list_channels(db: Session = Depends(get_db)):
-    return db.query(models.Channel).all()
+def list_channels(actor_user_id: int, db: Session = Depends(get_db)):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    if _is_admin(actor_user):
+        return db.query(models.Channel).all()
+
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    allowed_channel_ids = [
+        row[0]
+        for row in db.query(models.TextChannelPermission.channel_id)
+        .filter(
+            models.TextChannelPermission.user_id == actor_user.id,
+            models.TextChannelPermission.can_view.is_(True),
+        )
+        .all()
+    ]
+    if not allowed_channel_ids:
+        return []
+    return (
+        db.query(models.Channel)
+        .filter(models.Channel.id.in_(allowed_channel_ids))
+        .all()
+    )
 
 
 @app.delete("/channels/{channel_id}")
@@ -897,6 +1318,9 @@ async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depe
         )
 
     await manager.close_channel(channel_id)
+    db.query(models.TextChannelPermission).filter(
+        models.TextChannelPermission.channel_id == channel_id
+    ).delete(synchronize_session=False)
     db.query(models.Message).filter(models.Message.channel_id == channel_id).delete(
         synchronize_session=False
     )
@@ -906,7 +1330,12 @@ async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depe
 
 
 @app.get("/channels/{channel_id}/messages/", response_model=List[schemas.MessageSchema])
-def get_messages(channel_id: int, db: Session = Depends(get_db)):
+def get_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+
     return (
         db.query(models.Message)
         .options(joinedload(models.Message.user))
@@ -948,12 +1377,34 @@ def create_voice_channel(
         raise HTTPException(status_code=400, detail="Error creating voice channel")
 
     db.refresh(db_channel)
+    _ensure_permissions_for_new_voice_channel(db, db_channel.id)
     return db_channel
 
 
 @app.get("/voice-channels/", response_model=List[schemas.VoiceChannelSchema])
-def list_voice_channels(db: Session = Depends(get_db)):
-    return db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+def list_voice_channels(actor_user_id: int, db: Session = Depends(get_db)):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    if _is_admin(actor_user):
+        return db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+
+    _ensure_voice_channel_permissions_for_user(db, actor_user.id)
+    allowed_channel_ids = [
+        row[0]
+        for row in db.query(models.VoiceChannelPermission.channel_id)
+        .filter(
+            models.VoiceChannelPermission.user_id == actor_user.id,
+            models.VoiceChannelPermission.can_view.is_(True),
+        )
+        .all()
+    ]
+    if not allowed_channel_ids:
+        return []
+    return (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.id.in_(allowed_channel_ids))
+        .order_by(models.VoiceChannel.name.asc())
+        .all()
+    )
 
 
 @app.delete("/voice-channels/{voice_channel_id}")
@@ -984,6 +1435,9 @@ async def delete_voice_channel(
         )
 
     await voice_manager.close_channel(voice_channel_id)
+    db.query(models.VoiceChannelPermission).filter(
+        models.VoiceChannelPermission.channel_id == voice_channel_id
+    ).delete(synchronize_session=False)
     db.delete(db_voice_channel)
     db.commit()
     return {"detail": "Voice channel deleted"}
@@ -1067,12 +1521,31 @@ async def websocket_endpoint(
     user_id: int,
     db: Session = Depends(get_db),
 ):
-    await manager.connect(websocket, channel_id)
     db_user = db.query(models.User).filter(models.User.id == user_id).first()
-    username = db_user.username if db_user else "Unknown"
+    if not db_user:
+        await websocket.close(code=1008)
+        return
+
+    db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not db_channel:
+        await websocket.close(code=1008)
+        return
+
+    _ensure_text_channel_permissions_for_user(db, db_user.id)
+    if not _can_view_text_channel(db, db_user, channel_id):
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect(websocket, channel_id)
+    username = db_user.username
+    can_delete_any_message = _is_admin(db_user)
 
     try:
         while True:
+            if not _can_view_text_channel(db, db_user, channel_id):
+                await websocket.close(code=1008)
+                break
+
             data_str = await websocket.receive_text()
             try:
                 data_json = json.loads(data_str)
@@ -1131,10 +1604,15 @@ async def websocket_endpoint(
                     msg_id = data_json.get("id")
                     db_message = (
                         db.query(models.Message)
-                        .filter(models.Message.id == msg_id, models.Message.user_id == user_id)
+                        .filter(
+                            models.Message.id == msg_id,
+                            models.Message.channel_id == channel_id,
+                        )
                         .first()
                     )
                     if not db_message:
+                        continue
+                    if db_message.user_id != user_id and not can_delete_any_message:
                         continue
 
                     db.delete(db_message)
@@ -1207,6 +1685,11 @@ async def voice_websocket_endpoint(
         .first()
     )
     if not db_voice_channel:
+        await websocket.close(code=1008)
+        return
+
+    _ensure_voice_channel_permissions_for_user(db, db_user.id)
+    if not _can_view_voice_channel(db, db_user, voice_channel_id):
         await websocket.close(code=1008)
         return
 
