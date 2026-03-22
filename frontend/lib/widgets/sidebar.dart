@@ -60,41 +60,73 @@ class _SidebarState extends State<Sidebar> {
     required bool isVoice,
   }) {
     final controller = TextEditingController();
+    bool adminOnly = false;
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2F3136),
-        title: Text(isVoice ? "Create Voice Channel" : "Create Text Channel"),
-        content: TextField(
-          controller: controller,
-          decoration: InputDecoration(
-            labelText: "Channel Name",
-            hintText: isVoice ? "e.g. Lounge" : "e.g. general",
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF2F3136),
+          title: Text(isVoice ? "Create Voice Channel" : "Create Text Channel"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                decoration: InputDecoration(
+                  labelText: "Channel Name",
+                  hintText: isVoice ? "e.g. Lounge" : "e.g. general",
+                ),
+              ),
+              if (state.isAdmin) ...[
+                const SizedBox(height: 12),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: adminOnly,
+                  onChanged: (value) {
+                    setDialogState(() {
+                      adminOnly = value ?? false;
+                    });
+                  },
+                  title: const Text("Admins only"),
+                  subtitle: const Text("Hide this channel from non-admin users"),
+                ),
+              ],
+            ],
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                if (controller.text.trim().isEmpty) {
+                  return;
+                }
+
+                final success = isVoice
+                    ? await state.createVoiceChannel(
+                        controller.text.trim(),
+                        null,
+                        adminOnly: adminOnly,
+                      )
+                    : await state.createChannel(
+                        controller.text.trim(),
+                        null,
+                        adminOnly: adminOnly,
+                      );
+
+                if (success && context.mounted) {
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text("Create"),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Cancel", style: TextStyle(color: Colors.white)),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              if (controller.text.trim().isEmpty) {
-                return;
-              }
-
-              final success = isVoice
-                  ? await state.createVoiceChannel(controller.text.trim(), null)
-                  : await state.createChannel(controller.text.trim(), null);
-
-              if (success && context.mounted) {
-                Navigator.pop(context);
-              }
-            },
-            child: const Text("Create"),
-          ),
-        ],
       ),
     );
   }
@@ -399,20 +431,23 @@ class _SidebarState extends State<Sidebar> {
               padding: EdgeInsets.zero,
               children: [
                 if (state.isAdmin)
-                  ListTile(
-                    dense: true,
-                    leading: const Icon(
-                      Icons.admin_panel_settings_outlined,
-                      color: Colors.amberAccent,
+                  Material(
+                    type: MaterialType.transparency,
+                    child: ListTile(
+                      dense: true,
+                      leading: const Icon(
+                        Icons.admin_panel_settings_outlined,
+                        color: Colors.amberAccent,
+                      ),
+                      title: const Text("Admin Permissions"),
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const AdminPermissionsScreen(),
+                          ),
+                        );
+                      },
                     ),
-                    title: const Text("Admin Permissions"),
-                    onTap: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const AdminPermissionsScreen(),
-                        ),
-                      );
-                    },
                   ),
                 if (state.isAdmin) const Divider(height: 1, color: Color(0xFF202225)),
                 _sectionHeader(

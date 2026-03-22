@@ -450,35 +450,67 @@ class AppState extends ChangeNotifier {
     }
 
     try {
+      // Use string keys in the payload to keep JSON encoding predictable.
+      final textPayload = <String, bool>{
+        for (final entry in (textUpdates ?? const <int, bool>{}).entries)
+          entry.key.toString(): entry.value,
+      };
+      final voicePayload = <String, bool>{
+        for (final entry in (voiceUpdates ?? const <int, bool>{}).entries)
+          entry.key.toString(): entry.value,
+      };
+
       final response = await http.patch(
         Uri.parse(
           "$baseUrl/admin/users/${selected.userId}/permissions?actor_user_id=$userId",
         ),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "text_channel_permissions": textUpdates ?? <int, bool>{},
-          "voice_channel_permissions": voiceUpdates ?? <int, bool>{},
+          "text_channel_permissions": textPayload,
+          "voice_channel_permissions": voicePayload,
         }),
       );
-      if (response.statusCode != 200) {
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        debugPrint(
+          "Failed to update user permissions (${response.statusCode}): ${response.body}",
+        );
         return false;
       }
 
-      selectedUserChannelPermissions =
-          UserChannelPermissions.fromJson(jsonDecode(response.body));
+      final responseBody = response.body.trim();
+      if (responseBody.isNotEmpty) {
+        try {
+          selectedUserChannelPermissions =
+              UserChannelPermissions.fromJson(jsonDecode(responseBody));
+        } catch (_) {
+          await fetchAdminPermissionsForUser(selected.userId);
+        }
+      } else {
+        await fetchAdminPermissionsForUser(selected.userId);
+      }
 
       if (currentUser?.id == selected.userId) {
-        await fetchChannels();
-        await fetchVoiceChannels();
+        try {
+          await fetchChannels();
+          await fetchVoiceChannels();
+        } catch (_) {
+          // Permission update already succeeded; keep this non-fatal.
+        }
       }
       notifyListeners();
       return true;
-    } catch (_) {
+    } catch (error) {
+      debugPrint("Error while updating user permissions: $error");
       return false;
     }
   }
 
-  Future<bool> createChannel(String name, String? description) async {
+  Future<bool> createChannel(
+    String name,
+    String? description, {
+    bool adminOnly = false,
+  }) async {
     final userId = currentUser?.id;
     if (userId == null) {
       return false;
@@ -488,10 +520,14 @@ class AppState extends ChangeNotifier {
       final response = await http.post(
         Uri.parse("$baseUrl/channels/?actor_user_id=$userId"),
         headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"name": name, "description": description}),
+        body: jsonEncode({
+          "name": name,
+          "description": description,
+          "admin_only": adminOnly,
+        }),
       );
 
-      if (response.statusCode == 200) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
         await fetchChannels();
         return true;
       }
@@ -502,7 +538,11 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<bool> createVoiceChannel(String name, String? description) async {
+  Future<bool> createVoiceChannel(
+    String name,
+    String? description, {
+    bool adminOnly = false,
+  }) async {
     final userId = currentUser?.id;
     if (userId == null) {
       return false;
@@ -512,10 +552,14 @@ class AppState extends ChangeNotifier {
       final response = await http.post(
         Uri.parse("$baseUrl/voice-channels/?actor_user_id=$userId"),
         headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"name": name, "description": description}),
+        body: jsonEncode({
+          "name": name,
+          "description": description,
+          "admin_only": adminOnly,
+        }),
       );
 
-      if (response.statusCode == 200) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
         await fetchVoiceChannels();
         return true;
       }

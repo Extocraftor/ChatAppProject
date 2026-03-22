@@ -121,16 +121,19 @@ class _AdminPermissionsScreenState extends State<AdminPermissionsScreen> {
                             final user = state.adminUsers[index];
                             final isSelected =
                                 state.selectedAdminUser?.id == user.id;
-                            return ListTile(
-                              dense: true,
-                              selected: isSelected,
-                              selectedTileColor: const Color(0xFF40444B),
-                              title: Text(
-                                user.username,
-                                overflow: TextOverflow.ellipsis,
+                            return Material(
+                              type: MaterialType.transparency,
+                              child: ListTile(
+                                dense: true,
+                                selected: isSelected,
+                                selectedTileColor: const Color(0xFF40444B),
+                                title: Text(
+                                  user.username,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(user.role),
+                                onTap: () => _selectUser(state, user.id),
                               ),
-                              subtitle: Text(user.role),
-                              onTap: () => _selectUser(state, user.id),
                             );
                           },
                         ),

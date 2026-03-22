@@ -101,6 +101,12 @@ def _ensure_schema_columns() -> None:
             conn.execute(
                 text("ALTER TABLE channels ADD COLUMN creator_user_id INTEGER")
             )
+        if "admin_only" not in channel_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
 
         voice_channel_columns = {
             column["name"] for column in inspector.get_columns("voice_channels")
@@ -108,6 +114,12 @@ def _ensure_schema_columns() -> None:
         if "creator_user_id" not in voice_channel_columns:
             conn.execute(
                 text("ALTER TABLE voice_channels ADD COLUMN creator_user_id INTEGER")
+            )
+        if "admin_only" not in voice_channel_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE voice_channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT 0"
+                )
             )
 
 
@@ -448,9 +460,19 @@ def _ensure_admin_actor(db: Session, actor_user_id: int) -> models.User:
     return actor_user
 
 
+def _default_channel_visibility_for_role(role: str | None, admin_only: bool) -> bool:
+    if role == ROLE_ADMIN:
+        return True
+    return not admin_only
+
+
 def _ensure_text_channel_permissions_for_user(db: Session, user_id: int) -> None:
-    channel_ids = [row[0] for row in db.query(models.Channel.id).all()]
-    if not channel_ids:
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        return
+
+    channel_rows = db.query(models.Channel.id, models.Channel.admin_only).all()
+    if not channel_rows:
         return
 
     existing_channel_ids = {
@@ -459,10 +481,12 @@ def _ensure_text_channel_permissions_for_user(db: Session, user_id: int) -> None
         .filter(models.TextChannelPermission.user_id == user_id)
         .all()
     }
-    missing_channel_ids = [
-        channel_id for channel_id in channel_ids if channel_id not in existing_channel_ids
+    missing_channels = [
+        (channel_id, bool(admin_only))
+        for channel_id, admin_only in channel_rows
+        if channel_id not in existing_channel_ids
     ]
-    if not missing_channel_ids:
+    if not missing_channels:
         return
 
     db.add_all(
@@ -470,17 +494,24 @@ def _ensure_text_channel_permissions_for_user(db: Session, user_id: int) -> None
             models.TextChannelPermission(
                 user_id=user_id,
                 channel_id=channel_id,
-                can_view=True,
+                can_view=_default_channel_visibility_for_role(
+                    target_user.role,
+                    admin_only,
+                ),
             )
-            for channel_id in missing_channel_ids
+            for channel_id, admin_only in missing_channels
         ]
     )
     db.commit()
 
 
 def _ensure_voice_channel_permissions_for_user(db: Session, user_id: int) -> None:
-    channel_ids = [row[0] for row in db.query(models.VoiceChannel.id).all()]
-    if not channel_ids:
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        return
+
+    channel_rows = db.query(models.VoiceChannel.id, models.VoiceChannel.admin_only).all()
+    if not channel_rows:
         return
 
     existing_channel_ids = {
@@ -489,10 +520,12 @@ def _ensure_voice_channel_permissions_for_user(db: Session, user_id: int) -> Non
         .filter(models.VoiceChannelPermission.user_id == user_id)
         .all()
     }
-    missing_channel_ids = [
-        channel_id for channel_id in channel_ids if channel_id not in existing_channel_ids
+    missing_channels = [
+        (channel_id, bool(admin_only))
+        for channel_id, admin_only in channel_rows
+        if channel_id not in existing_channel_ids
     ]
-    if not missing_channel_ids:
+    if not missing_channels:
         return
 
     db.add_all(
@@ -500,9 +533,12 @@ def _ensure_voice_channel_permissions_for_user(db: Session, user_id: int) -> Non
             models.VoiceChannelPermission(
                 user_id=user_id,
                 channel_id=channel_id,
-                can_view=True,
+                can_view=_default_channel_visibility_for_role(
+                    target_user.role,
+                    admin_only,
+                ),
             )
-            for channel_id in missing_channel_ids
+            for channel_id, admin_only in missing_channels
         ]
     )
     db.commit()
@@ -514,37 +550,54 @@ def _ensure_permissions_for_user(db: Session, user_id: int) -> None:
 
 
 def _ensure_permissions_for_new_user(db: Session, user_id: int) -> None:
-    text_channel_ids = [row[0] for row in db.query(models.Channel.id).all()]
-    voice_channel_ids = [row[0] for row in db.query(models.VoiceChannel.id).all()]
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        return
 
-    if text_channel_ids:
+    text_channel_rows = db.query(models.Channel.id, models.Channel.admin_only).all()
+    voice_channel_rows = db.query(
+        models.VoiceChannel.id,
+        models.VoiceChannel.admin_only,
+    ).all()
+
+    if text_channel_rows:
         db.add_all(
             [
                 models.TextChannelPermission(
                     user_id=user_id,
                     channel_id=channel_id,
-                    can_view=True,
+                    can_view=_default_channel_visibility_for_role(
+                        target_user.role,
+                        bool(admin_only),
+                    ),
                 )
-                for channel_id in text_channel_ids
+                for channel_id, admin_only in text_channel_rows
             ]
         )
-    if voice_channel_ids:
+    if voice_channel_rows:
         db.add_all(
             [
                 models.VoiceChannelPermission(
                     user_id=user_id,
                     channel_id=channel_id,
-                    can_view=True,
+                    can_view=_default_channel_visibility_for_role(
+                        target_user.role,
+                        bool(admin_only),
+                    ),
                 )
-                for channel_id in voice_channel_ids
+                for channel_id, admin_only in voice_channel_rows
             ]
         )
     db.commit()
 
 
-def _ensure_permissions_for_new_text_channel(db: Session, channel_id: int) -> None:
-    user_ids = [row[0] for row in db.query(models.User.id).all()]
-    if not user_ids:
+def _ensure_permissions_for_new_text_channel(
+    db: Session,
+    channel_id: int,
+    admin_only: bool = False,
+) -> None:
+    user_rows = db.query(models.User.id, models.User.role).all()
+    if not user_rows:
         return
 
     existing_user_ids = {
@@ -553,8 +606,12 @@ def _ensure_permissions_for_new_text_channel(db: Session, channel_id: int) -> No
         .filter(models.TextChannelPermission.channel_id == channel_id)
         .all()
     }
-    missing_user_ids = [user_id for user_id in user_ids if user_id not in existing_user_ids]
-    if not missing_user_ids:
+    missing_user_rows = [
+        (user_id, role)
+        for user_id, role in user_rows
+        if user_id not in existing_user_ids
+    ]
+    if not missing_user_rows:
         return
 
     db.add_all(
@@ -562,17 +619,24 @@ def _ensure_permissions_for_new_text_channel(db: Session, channel_id: int) -> No
             models.TextChannelPermission(
                 user_id=user_id,
                 channel_id=channel_id,
-                can_view=True,
+                can_view=_default_channel_visibility_for_role(
+                    role,
+                    admin_only,
+                ),
             )
-            for user_id in missing_user_ids
+            for user_id, role in missing_user_rows
         ]
     )
     db.commit()
 
 
-def _ensure_permissions_for_new_voice_channel(db: Session, channel_id: int) -> None:
-    user_ids = [row[0] for row in db.query(models.User.id).all()]
-    if not user_ids:
+def _ensure_permissions_for_new_voice_channel(
+    db: Session,
+    channel_id: int,
+    admin_only: bool = False,
+) -> None:
+    user_rows = db.query(models.User.id, models.User.role).all()
+    if not user_rows:
         return
 
     existing_user_ids = {
@@ -581,8 +645,12 @@ def _ensure_permissions_for_new_voice_channel(db: Session, channel_id: int) -> N
         .filter(models.VoiceChannelPermission.channel_id == channel_id)
         .all()
     }
-    missing_user_ids = [user_id for user_id in user_ids if user_id not in existing_user_ids]
-    if not missing_user_ids:
+    missing_user_rows = [
+        (user_id, role)
+        for user_id, role in user_rows
+        if user_id not in existing_user_ids
+    ]
+    if not missing_user_rows:
         return
 
     db.add_all(
@@ -590,9 +658,12 @@ def _ensure_permissions_for_new_voice_channel(db: Session, channel_id: int) -> N
             models.VoiceChannelPermission(
                 user_id=user_id,
                 channel_id=channel_id,
-                can_view=True,
+                can_view=_default_channel_visibility_for_role(
+                    role,
+                    admin_only,
+                ),
             )
-            for user_id in missing_user_ids
+            for user_id, role in missing_user_rows
         ]
     )
     db.commit()
@@ -601,11 +672,14 @@ def _ensure_permissions_for_new_voice_channel(db: Session, channel_id: int) -> N
 def _backfill_default_channel_permissions() -> None:
     db = SessionLocal()
     try:
-        user_ids = [row[0] for row in db.query(models.User.id).all()]
-        text_channel_ids = [row[0] for row in db.query(models.Channel.id).all()]
-        voice_channel_ids = [row[0] for row in db.query(models.VoiceChannel.id).all()]
+        user_rows = db.query(models.User.id, models.User.role).all()
+        text_channel_rows = db.query(models.Channel.id, models.Channel.admin_only).all()
+        voice_channel_rows = db.query(
+            models.VoiceChannel.id,
+            models.VoiceChannel.admin_only,
+        ).all()
 
-        if user_ids and text_channel_ids:
+        if user_rows and text_channel_rows:
             existing_text_pairs = {
                 (row[0], row[1])
                 for row in db.query(
@@ -614,20 +688,23 @@ def _backfill_default_channel_permissions() -> None:
                 ).all()
             }
             text_inserts = []
-            for user_id in user_ids:
-                for channel_id in text_channel_ids:
+            for user_id, role in user_rows:
+                for channel_id, admin_only in text_channel_rows:
                     if (user_id, channel_id) not in existing_text_pairs:
                         text_inserts.append(
                             models.TextChannelPermission(
                                 user_id=user_id,
                                 channel_id=channel_id,
-                                can_view=True,
+                                can_view=_default_channel_visibility_for_role(
+                                    role,
+                                    bool(admin_only),
+                                ),
                             )
                         )
             if text_inserts:
                 db.add_all(text_inserts)
 
-        if user_ids and voice_channel_ids:
+        if user_rows and voice_channel_rows:
             existing_voice_pairs = {
                 (row[0], row[1])
                 for row in db.query(
@@ -636,14 +713,17 @@ def _backfill_default_channel_permissions() -> None:
                 ).all()
             }
             voice_inserts = []
-            for user_id in user_ids:
-                for channel_id in voice_channel_ids:
+            for user_id, role in user_rows:
+                for channel_id, admin_only in voice_channel_rows:
                     if (user_id, channel_id) not in existing_voice_pairs:
                         voice_inserts.append(
                             models.VoiceChannelPermission(
                                 user_id=user_id,
                                 channel_id=channel_id,
-                                can_view=True,
+                                can_view=_default_channel_visibility_for_role(
+                                    role,
+                                    bool(admin_only),
+                                ),
                             )
                         )
             if voice_inserts:
@@ -669,7 +749,13 @@ def _can_view_text_channel(db: Session, user: models.User, channel_id: int) -> b
         )
         .first()
     )
-    return permission.can_view if permission else True
+    if permission:
+        return permission.can_view
+
+    channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not channel:
+        return False
+    return not bool(channel.admin_only)
 
 
 def _can_view_voice_channel(db: Session, user: models.User, channel_id: int) -> bool:
@@ -684,7 +770,17 @@ def _can_view_voice_channel(db: Session, user: models.User, channel_id: int) -> 
         )
         .first()
     )
-    return permission.can_view if permission else True
+    if permission:
+        return permission.can_view
+
+    channel = (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.id == channel_id)
+        .first()
+    )
+    if not channel:
+        return False
+    return not bool(channel.admin_only)
 
 
 def _build_user_channel_permissions_response(
@@ -709,6 +805,7 @@ def _build_user_channel_permissions_response(
         .filter(models.VoiceChannelPermission.user_id == target_user.id)
         .all()
     }
+    target_is_admin = _is_admin(target_user)
 
     return schemas.UserChannelPermissionsSchema(
         user_id=target_user.id,
@@ -718,7 +815,10 @@ def _build_user_channel_permissions_response(
             schemas.ChannelVisibilityPermissionSchema(
                 channel_id=channel.id,
                 channel_name=channel.name,
-                can_view=text_permission_map.get(channel.id, True),
+                can_view=text_permission_map.get(
+                    channel.id,
+                    True if target_is_admin else not bool(channel.admin_only),
+                ),
             )
             for channel in text_channels
         ],
@@ -726,7 +826,10 @@ def _build_user_channel_permissions_response(
             schemas.ChannelVisibilityPermissionSchema(
                 channel_id=channel.id,
                 channel_name=channel.name,
-                can_view=voice_permission_map.get(channel.id, True),
+                can_view=voice_permission_map.get(
+                    channel.id,
+                    True if target_is_admin else not bool(channel.admin_only),
+                ),
             )
             for channel in voice_channels
         ],
@@ -1258,20 +1361,31 @@ def create_channel(
     actor_user_id: int | None = None,
     db: Session = Depends(get_db),
 ):
+    actor_user = None
     creator_user_id = None
     if actor_user_id is not None:
         actor_user = _ensure_actor_user(db, actor_user_id)
         creator_user_id = actor_user.id
+    if channel.admin_only and (actor_user is None or not _is_admin(actor_user)):
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can create admin-only channels",
+        )
 
     db_channel = models.Channel(
         name=channel.name,
         description=channel.description,
+        admin_only=bool(channel.admin_only),
         creator_user_id=creator_user_id,
     )
     db.add(db_channel)
     db.commit()
     db.refresh(db_channel)
-    _ensure_permissions_for_new_text_channel(db, db_channel.id)
+    _ensure_permissions_for_new_text_channel(
+        db,
+        db_channel.id,
+        admin_only=bool(db_channel.admin_only),
+    )
     return db_channel
 
 
@@ -1351,10 +1465,16 @@ def create_voice_channel(
     actor_user_id: int | None = None,
     db: Session = Depends(get_db),
 ):
+    actor_user = None
     creator_user_id = None
     if actor_user_id is not None:
         actor_user = _ensure_actor_user(db, actor_user_id)
         creator_user_id = actor_user.id
+    if channel.admin_only and (actor_user is None or not _is_admin(actor_user)):
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can create admin-only channels",
+        )
 
     existing_channel = (
         db.query(models.VoiceChannel)
@@ -1367,6 +1487,7 @@ def create_voice_channel(
     db_channel = models.VoiceChannel(
         name=channel.name,
         description=channel.description,
+        admin_only=bool(channel.admin_only),
         creator_user_id=creator_user_id,
     )
     db.add(db_channel)
@@ -1377,7 +1498,11 @@ def create_voice_channel(
         raise HTTPException(status_code=400, detail="Error creating voice channel")
 
     db.refresh(db_channel)
-    _ensure_permissions_for_new_voice_channel(db, db_channel.id)
+    _ensure_permissions_for_new_voice_channel(
+        db,
+        db_channel.id,
+        admin_only=bool(db_channel.admin_only),
+    )
     return db_channel
 
 

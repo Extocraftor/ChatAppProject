@@ -46,6 +46,7 @@ class Channel(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     description = Column(String)
+    admin_only = Column(Boolean, nullable=False, default=False)
     creator_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     messages = relationship("Message", back_populates="channel")
     creator = relationship(
@@ -65,6 +66,7 @@ class VoiceChannel(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     description = Column(String)
+    admin_only = Column(Boolean, nullable=False, default=False)
     creator_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     creator = relationship(
         "User",

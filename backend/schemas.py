@@ -28,10 +28,11 @@ class ChannelBase(BaseModel):
     description: Optional[str] = None
 
 class ChannelCreate(ChannelBase):
-    pass
+    admin_only: bool = False
 
 class ChannelSchema(ChannelBase):
     id: int
+    admin_only: bool = False
     creator_user_id: Optional[int] = None
     messages: List[MessageSchema] = []
 
@@ -45,11 +46,12 @@ class VoiceChannelBase(BaseModel):
 
 
 class VoiceChannelCreate(VoiceChannelBase):
-    pass
+    admin_only: bool = False
 
 
 class VoiceChannelSchema(VoiceChannelBase):
     id: int
+    admin_only: bool = False
     creator_user_id: Optional[int] = None
 
     class Config:

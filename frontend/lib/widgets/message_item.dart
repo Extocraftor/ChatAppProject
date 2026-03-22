@@ -202,7 +202,6 @@ class _MessageItemState extends State<MessageItem> {
                           tooltip: "Delete",
                           constraints: const BoxConstraints(),
                         ),
-                      ],
                     ],
                   ),
                 ),
