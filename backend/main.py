@@ -34,11 +34,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
-MUSIC_BOT_USER_ID = -9000
-MUSIC_BOT_USERNAME = "Music Bot"
-MUSIC_BOT_HELP_TEXT = (
-    "Music commands: /play <youtube_url>, /pause, /resume, /stop, /leave, /nowplaying, /help"
-)
+PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
 YOUTUBE_URL_PATTERN = re.compile(
     r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$",
     re.IGNORECASE,
@@ -180,8 +176,6 @@ class VoiceConnectionManager:
         self.usernames: Dict[int, Dict[int, str]] = {}
         # channel_id -> user_id -> muted state
         self.mute_states: Dict[int, Dict[int, bool]] = {}
-        # channel_id -> music metadata/state
-        self.music_states: Dict[int, Dict[str, Any]] = {}
 
     async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
         await websocket.accept()
@@ -218,7 +212,6 @@ class VoiceConnectionManager:
                 removed = True
             if not channel_connections:
                 self.active_connections.pop(channel_id, None)
-                self.music_states.pop(channel_id, None)
 
         if channel_id in self.usernames:
             self.usernames[channel_id].pop(user_id, None)
@@ -234,25 +227,14 @@ class VoiceConnectionManager:
     def participants(self, channel_id: int) -> List[Dict[str, Any]]:
         usernames = self.usernames.get(channel_id, {})
         mute_states = self.mute_states.get(channel_id, {})
-        participants = [
+        return [
             {
                 "user_id": user_id,
                 "username": usernames.get(user_id, f"User #{user_id}"),
                 "is_muted": mute_states.get(user_id, False),
-                "is_bot": False,
             }
             for user_id in usernames.keys()
         ]
-        if channel_id in self.music_states:
-            participants.append(
-                {
-                    "user_id": MUSIC_BOT_USER_ID,
-                    "username": MUSIC_BOT_USERNAME,
-                    "is_muted": False,
-                    "is_bot": True,
-                }
-            )
-        return participants
 
     def update_mute_state(self, channel_id: int, user_id: int, is_muted: bool):
         if channel_id not in self.mute_states:
@@ -264,15 +246,6 @@ class VoiceConnectionManager:
             if user_id in channel_connections:
                 return channel_id
         return None
-
-    def music_state_for_channel(self, channel_id: int) -> Dict[str, Any] | None:
-        return self.music_states.get(channel_id)
-
-    def set_music_state(self, channel_id: int, state: Dict[str, Any]) -> None:
-        self.music_states[channel_id] = state
-
-    def clear_music_state(self, channel_id: int) -> bool:
-        return self.music_states.pop(channel_id, None) is not None
 
     async def send_to_user(self, channel_id: int, user_id: int, payload: Dict[str, Any]):
         channel_connections = self.active_connections.get(channel_id, {})
@@ -296,7 +269,6 @@ class VoiceConnectionManager:
         channel_connections = self.active_connections.pop(channel_id, {})
         self.usernames.pop(channel_id, None)
         self.mute_states.pop(channel_id, None)
-        self.music_states.pop(channel_id, None)
         for websocket in list(channel_connections.values()):
             try:
                 await websocket.close(code=1008)
@@ -320,48 +292,7 @@ async def _send_music_bot_notice(channel_id: int, content: str) -> None:
     )
 
 
-def _music_bot_participant_payload() -> Dict[str, Any]:
-    return {
-        "user_id": MUSIC_BOT_USER_ID,
-        "username": MUSIC_BOT_USERNAME,
-        "is_muted": False,
-        "is_bot": True,
-    }
-
-
-def _parse_music_command(content: str) -> tuple[str, str] | None:
-    text = content.strip()
-    if not text:
-        return None
-
-    if text.lower() == "play":
-        return "/play", ""
-    if text.lower().startswith("play "):
-        return "/play", text[5:].strip()
-
-    if not text.startswith("/"):
-        return None
-
-    parts = text.split(maxsplit=1)
-    command = parts[0].lower()
-    argument = parts[1].strip() if len(parts) > 1 else ""
-
-    if command in {
-        "/play",
-        "/pause",
-        "/resume",
-        "/stop",
-        "/leave",
-        "/nowplaying",
-        "/help",
-        "/commands",
-    }:
-        return command, argument
-
-    return None
-
-
-async def _handle_music_command(
+async def _handle_music_play_command(
     channel_id: int,
     user_id: int,
     username: str,
@@ -370,170 +301,50 @@ async def _handle_music_command(
     if not isinstance(content, str):
         return
 
-    parsed = _parse_music_command(content)
-    if parsed is None:
+    command_match = PLAY_COMMAND_PATTERN.match(content.strip())
+    if not command_match:
         return
-    command, argument = parsed
 
-    if command in {"/help", "/commands"}:
-        await _send_music_bot_notice(channel_id, MUSIC_BOT_HELP_TEXT)
+    raw_url = (command_match.group("url") or "").strip().strip("<>")
+    if not raw_url:
+        await _send_music_bot_notice(channel_id, "Usage: play <youtube_url>")
+        return
+
+    if not YOUTUBE_URL_PATTERN.match(raw_url):
+        await _send_music_bot_notice(channel_id, "Only YouTube links are supported for now.")
         return
 
     voice_channel_id = voice_manager.find_channel_for_user(user_id)
     if voice_channel_id is None:
         await _send_music_bot_notice(
             channel_id,
-            "Join a voice channel first, then use /play <youtube_url>.",
+            "Join a voice channel first, then use play <youtube_url>.",
         )
         return
 
-    music_state = voice_manager.music_state_for_channel(voice_channel_id)
+    try:
+        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, raw_url)
+    except Exception:
+        logger.exception("music command failed user=%s url=%s", user_id, raw_url)
+        await _send_music_bot_notice(channel_id, "I couldn't load that YouTube link.")
+        return
 
-    if command == "/play":
-        raw_url = argument.strip().strip("<>")
-        if not raw_url:
-            await _send_music_bot_notice(channel_id, "Usage: /play <youtube_url>")
-            return
-
-        if not YOUTUBE_URL_PATTERN.match(raw_url):
-            await _send_music_bot_notice(channel_id, "Only YouTube links are supported for now.")
-            return
-
-        try:
-            title, stream_url = await asyncio.to_thread(_extract_youtube_stream, raw_url)
-        except Exception:
-            logger.exception("music command failed user=%s url=%s", user_id, raw_url)
-            await _send_music_bot_notice(channel_id, "I couldn't load that YouTube link.")
-            return
-
-        should_join = music_state is None
-        updated_state = {
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "music_play",
             "title": title,
             "source_url": raw_url,
             "stream_url": stream_url,
             "requested_by_user_id": user_id,
             "requested_by_username": username,
-            "status": "playing",
-        }
-        voice_manager.set_music_state(voice_channel_id, updated_state)
+        },
+    )
 
-        if should_join:
-            await voice_manager.broadcast(
-                voice_channel_id,
-                {
-                    "type": "participant_joined",
-                    **_music_bot_participant_payload(),
-                },
-            )
-
-        await voice_manager.broadcast(
-            voice_channel_id,
-            {
-                "type": "music_play",
-                **updated_state,
-            },
-        )
-
-        await _send_music_bot_notice(channel_id, f"Now playing in voice: {title}")
-        return
-
-    if music_state is None:
-        await _send_music_bot_notice(
-            channel_id,
-            "Music bot is not active in your voice channel. Use /play first.",
-        )
-        return
-
-    if command == "/pause":
-        if music_state.get("status") != "playing":
-            await _send_music_bot_notice(channel_id, "Nothing is currently playing.")
-            return
-
-        music_state["status"] = "paused"
-        voice_manager.set_music_state(voice_channel_id, music_state)
-        await voice_manager.broadcast(
-            voice_channel_id,
-            {
-                "type": "music_pause",
-                "requested_by_user_id": user_id,
-                "requested_by_username": username,
-            },
-        )
-        await _send_music_bot_notice(channel_id, "Playback paused.")
-        return
-
-    if command == "/resume":
-        if music_state.get("status") != "paused":
-            await _send_music_bot_notice(channel_id, "Music is not paused.")
-            return
-
-        music_state["status"] = "playing"
-        voice_manager.set_music_state(voice_channel_id, music_state)
-        await voice_manager.broadcast(
-            voice_channel_id,
-            {
-                "type": "music_resume",
-                "requested_by_user_id": user_id,
-                "requested_by_username": username,
-            },
-        )
-        await _send_music_bot_notice(channel_id, "Playback resumed.")
-        return
-
-    if command == "/stop":
-        if music_state.get("status") == "stopped":
-            await _send_music_bot_notice(channel_id, "Nothing is currently playing.")
-            return
-
-        music_state["status"] = "stopped"
-        voice_manager.set_music_state(voice_channel_id, music_state)
-        await voice_manager.broadcast(
-            voice_channel_id,
-            {
-                "type": "music_stop",
-                "requested_by_user_id": user_id,
-                "requested_by_username": username,
-            },
-        )
-        await _send_music_bot_notice(channel_id, "Playback stopped. Bot is still in channel.")
-        return
-
-    if command == "/leave":
-        voice_manager.clear_music_state(voice_channel_id)
-        await voice_manager.broadcast(
-            voice_channel_id,
-            {
-                "type": "music_stop",
-                "requested_by_user_id": user_id,
-                "requested_by_username": username,
-            },
-        )
-        await voice_manager.broadcast(
-            voice_channel_id,
-            {
-                "type": "participant_left",
-                "user_id": MUSIC_BOT_USER_ID,
-            },
-        )
-        await _send_music_bot_notice(channel_id, "Music bot left your voice channel.")
-        return
-
-    if command == "/nowplaying":
-        title = music_state.get("title")
-        requested_by = music_state.get("requested_by_username")
-        status = str(music_state.get("status") or "stopped").lower()
-        if not title or status == "stopped":
-            await _send_music_bot_notice(channel_id, "Nothing is currently playing.")
-            return
-
-        status_text = "paused" if status == "paused" else "playing"
-        if requested_by:
-            await _send_music_bot_notice(
-                channel_id,
-                f"Now {status_text}: {title} (requested by {requested_by})",
-            )
-        else:
-            await _send_music_bot_notice(channel_id, f"Now {status_text}: {title}")
+    await _send_music_bot_notice(
+        channel_id,
+        f"Now playing in voice: {title}",
+    )
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -911,7 +722,7 @@ async def websocket_endpoint(
 
                 await manager.broadcast(broadcast_msg, channel_id)
                 if msg_type == "new_message":
-                    await _handle_music_command(
+                    await _handle_music_play_command(
                         channel_id=channel_id,
                         user_id=user_id,
                         username=username,
@@ -934,7 +745,7 @@ async def websocket_endpoint(
                     }
                 )
                 await manager.broadcast(broadcast_msg, channel_id)
-                await _handle_music_command(
+                await _handle_music_play_command(
                     channel_id=channel_id,
                     user_id=user_id,
                     username=username,
@@ -979,27 +790,6 @@ async def voice_websocket_endpoint(
         },
     )
 
-    active_music_state = voice_manager.music_state_for_channel(voice_channel_id)
-    if active_music_state and active_music_state.get("status") in {"playing", "paused"}:
-        await voice_manager.send_to_user(
-            voice_channel_id,
-            user_id,
-            {
-                "type": "music_play",
-                **active_music_state,
-            },
-        )
-        if active_music_state.get("status") == "paused":
-            await voice_manager.send_to_user(
-                voice_channel_id,
-                user_id,
-                {
-                    "type": "music_pause",
-                    "requested_by_user_id": active_music_state.get("requested_by_user_id"),
-                    "requested_by_username": active_music_state.get("requested_by_username"),
-                },
-            )
-
     await voice_manager.broadcast(
         voice_channel_id,
         {
@@ -1007,7 +797,6 @@ async def voice_websocket_endpoint(
             "user_id": user_id,
             "username": username,
             "is_muted": voice_manager.mute_states.get(voice_channel_id, {}).get(user_id, False),
-            "is_bot": False,
         },
         exclude_user_id=user_id,
     )

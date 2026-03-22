@@ -64,25 +64,21 @@ class VoiceParticipant {
   final int userId;
   final String username;
   final bool isMuted;
-  final bool isBot;
 
   VoiceParticipant({
     required this.userId,
     required this.username,
     required this.isMuted,
-    this.isBot = false,
   });
 
   VoiceParticipant copyWith({
     String? username,
     bool? isMuted,
-    bool? isBot,
   }) {
     return VoiceParticipant(
       userId: userId,
       username: username ?? this.username,
       isMuted: isMuted ?? this.isMuted,
-      isBot: isBot ?? this.isBot,
     );
   }
 
@@ -91,7 +87,6 @@ class VoiceParticipant {
       userId: json['user_id'],
       username: json['username'] ?? "User #${json['user_id']}",
       isMuted: json['is_muted'] ?? false,
-      isBot: json['is_bot'] ?? false,
     );
   }
 }
