@@ -11,7 +11,7 @@ from database import SessionLocal, engine, get_db
 import models, schemas
 from passlib.context import CryptContext
 
-# Password hashing configuration
+# Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
