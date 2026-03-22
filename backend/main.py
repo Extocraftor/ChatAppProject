@@ -427,7 +427,7 @@ def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
 
 
 def _build_ytdlp_options(
-    format_selector: str = "bestaudio[ext=m4a]/bestaudio/best",
+    format_selector: str = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
     use_tuned_extractor: bool = False,
 ) -> Dict[str, Any]:
     options: Dict[str, Any] = {
@@ -889,20 +889,28 @@ async def audio_proxy(url: str):
     # Decode the URL if it's double-encoded
     target_url = urllib.parse.unquote(url)
 
-    async def stream_audio():
-        # Use a common User-Agent to avoid blocks
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        async with httpx.AsyncClient() as client:
-            try:
-                async with client.stream("GET", target_url, headers=headers, follow_redirects=True, timeout=30.0) as response:
-                    async for chunk in response.aiter_bytes():
-                        yield chunk
-            except Exception as e:
-                logger.error(f"Proxy error: {e}")
+    async with httpx.AsyncClient() as client:
+        try:
+            # We open the stream but don't read the body yet
+            # follow_redirects=True is important as YouTube/SoundCloud URLs often redirect
+            response = await client.get(target_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }, follow_redirects=True, timeout=10.0)
+            
+            # Relay the original content type if available
+            content_type = response.headers.get("Content-Type", "audio/mpeg")
 
-    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+            async def stream_audio():
+                async with client.stream("GET", target_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                }, follow_redirects=True, timeout=30.0) as resp:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+
+            return StreamingResponse(stream_audio(), media_type=content_type)
+        except Exception as e:
+            logger.error(f"Proxy error: {e}")
+            raise HTTPException(status_code=500, detail="Could not proxy audio")
 
 
 # --- WEBSOCKET ENDPOINTS ---
