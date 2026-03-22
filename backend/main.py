@@ -1,12 +1,24 @@
+import asyncio
+import base64
+import json
+import logging
+import os
+import re
+import tempfile
+from typing import Any, Dict, List
+import urllib.parse
+
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
-from typing import Any, Dict, List
-import json
-import os
-import logging
 
+try:
+    import yt_dlp
+except Exception:  # pragma: no cover - optional dependency at runtime
+    yt_dlp = None
 from database import SessionLocal, engine, get_db
 import models, schemas
 from passlib.context import CryptContext
@@ -27,6 +39,40 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
+PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
+YOUTUBE_URL_PATTERN = re.compile(
+    r"^(https?://)?((www|m|music)\.)?(youtube\.com|youtu\.be)/.+$",
+    re.IGNORECASE,
+)
+SPOTIFY_URL_PATTERN = re.compile(
+    r"^(https?://)?(open\.spotify\.com/track/)(?P<id>[a-zA-Z0-9]+).*$",
+    re.IGNORECASE,
+)
+SOUNDCLOUD_URL_PATTERN = re.compile(
+    r"^(https?://)?((www|m|on)\.)?(soundcloud\.com|snd\.sc)/.+$",
+    re.IGNORECASE,
+)
+AUTO_COOKIE_BROWSERS = ("edge", "chrome", "brave", "firefox")
+YTDLP_BOT_CHECK_PHRASES = (
+    "sign in to confirm you're not a bot",
+    "sign in to confirm you are not a bot",
+    "use --cookies-from-browser or --cookies for the authentication",
+)
+YTDLP_FORMAT_UNAVAILABLE_PHRASES = (
+    "requested format is not available",
+)
+MANIFEST_FORMAT_HINTS = ("m3u8", "hls", "dash", "f4m", "ism")
+PREFERRED_AUDIO_EXT_ORDER = ("mp3", "m4a", "aac", "opus", "ogg", "webm", "wav")
+PREFERRED_AUDIO_EXT_RANK = {
+    ext: rank for rank, ext in enumerate(PREFERRED_AUDIO_EXT_ORDER)
+}
+
+
+class MusicExtractionError(RuntimeError):
+    pass
+
+
+_YTDLP_COOKIEFILE_CACHE: str | None = None
 
 
 def _parse_username_set(env_name: str) -> set[str]:
@@ -229,6 +275,12 @@ class VoiceConnectionManager:
             self.mute_states[channel_id] = {}
         self.mute_states[channel_id][user_id] = is_muted
 
+    def find_channel_for_user(self, user_id: int) -> int | None:
+        for channel_id, channel_connections in self.active_connections.items():
+            if user_id in channel_connections:
+                return channel_id
+        return None
+
     async def send_to_user(self, channel_id: int, user_id: int, payload: Dict[str, Any]):
         channel_connections = self.active_connections.get(channel_id, {})
         websocket = channel_connections.get(user_id)
@@ -262,6 +314,104 @@ manager = ConnectionManager()
 voice_manager = VoiceConnectionManager()
 
 
+async def _send_music_bot_notice(channel_id: int, content: str) -> None:
+    await manager.broadcast(
+        json.dumps(
+            {
+                "type": "music_bot_notice",
+                "content": content,
+            }
+        ),
+        channel_id,
+    )
+
+
+async def _handle_music_play_command(
+    channel_id: int,
+    user_id: int,
+    username: str,
+    content: Any,
+    base_url: str | None = None,
+) -> None:
+    if not isinstance(content, str):
+        return
+
+    command_match = PLAY_COMMAND_PATTERN.match(content.strip())
+    if not command_match:
+        return
+
+    raw_url = (command_match.group("url") or "").strip().strip("<>")
+    if not raw_url:
+        await _send_music_bot_notice(channel_id, "Usage: play <url or song name>")
+        return
+
+    # Determine extraction strategy
+    extraction_url = raw_url
+    is_spotify = bool(SPOTIFY_URL_PATTERN.match(raw_url))
+    is_soundcloud = bool(SOUNDCLOUD_URL_PATTERN.match(raw_url))
+    is_youtube = bool(YOUTUBE_URL_PATTERN.match(raw_url))
+
+    # Specific format for SoundCloud to avoid HLS/m3u8
+    custom_format = None
+    if is_soundcloud:
+        custom_format = (
+            "http_mp3_128_url/http_aac_160_url/"
+            "bestaudio[protocol^=http][ext=mp3]/"
+            "bestaudio[protocol^=http][ext=m4a]/"
+            "bestaudio[protocol^=http][acodec!=none][vcodec=none]/"
+            "bestaudio[protocol^=http]/bestaudio/best"
+        )
+
+    if is_spotify:
+        extraction_url = f"ytsearch1:{raw_url}"
+    elif not is_youtube and not is_soundcloud:
+        extraction_url = f"ytsearch1:{raw_url}"
+
+    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+    if voice_channel_id is None:
+        await _send_music_bot_notice(
+            channel_id,
+            "Join a voice channel first, then use play <url>.",
+        )
+        return
+
+    try:
+        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, extraction_url, format_override=custom_format)
+    except MusicExtractionError as exc:
+        logger.warning("music extraction blocked user=%s url=%s error=%s", user_id, raw_url, exc)
+        await _send_music_bot_notice(channel_id, str(exc))
+        return
+    except Exception:
+        logger.exception("music command failed user=%s url=%s", user_id, raw_url)
+        await _send_music_bot_notice(channel_id, "I couldn't load that link.")
+        return
+
+    # Construct proxy URL if base_url is provided
+    # Proxying is generally safer for YouTube/SoundCloud
+    final_stream_url = stream_url
+    if base_url:
+        base = base_url.rstrip("/")
+        encoded_stream_url = urllib.parse.quote(stream_url, safe="")
+        final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
+
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "music_play",
+            "title": title,
+            "source_url": raw_url,
+            "stream_url": final_stream_url,
+            "requested_by_user_id": user_id,
+            "requested_by_username": username,
+        },
+    )
+
+    await _send_music_bot_notice(
+        channel_id,
+        f"Now playing: {title}",
+    )
+
+
 def _resolve_user_role(username: str, db: Session) -> str:
     normalized_username = username.strip().lower()
     if normalized_username in ADMIN_USERNAMES:
@@ -285,6 +435,361 @@ def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
     if not actor_user:
         raise HTTPException(status_code=404, detail="Actor user not found")
     return actor_user
+
+
+def _build_ytdlp_options(
+    format_selector: str = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
+    use_tuned_extractor: bool = False,
+) -> Dict[str, Any]:
+    options: Dict[str, Any] = {
+        "format": format_selector,
+        "noplaylist": True,
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 5,
+        "extractor_retries": 5,
+        "socket_timeout": 30,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+
+    if use_tuned_extractor:
+        player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
+        player_clients = [
+            item.strip() for item in player_clients_raw.split(",") if item.strip()
+        ] or ["ios", "android", "web"]
+
+        player_skip_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_SKIP", "")
+        player_skip = [
+            item.strip() for item in player_skip_raw.split(",") if item.strip()
+        ] or ["webpage", "configs"]
+
+        options["extractor_args"] = {
+            "youtube": {
+                "player_client": player_clients,
+                "player_skip": player_skip,
+            }
+        }
+
+    return options
+
+
+def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
+    strategies: List[tuple[str, Dict[str, Any]]] = [
+        ("audio-http-direct", _build_ytdlp_options(use_tuned_extractor=False)),
+        ("audio-default", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=False)),
+        ("best-default", _build_ytdlp_options("best", use_tuned_extractor=False)),
+    ]
+
+    tune_enabled_value = os.getenv("MUSIC_BOT_YTDLP_ENABLE_TUNED_EXTRACTOR", "1").strip().lower()
+    tune_enabled = tune_enabled_value not in {"0", "false", "no", "off"}
+    if tune_enabled:
+        strategies.extend(
+            [
+                ("audio-http-direct-tuned", _build_ytdlp_options(use_tuned_extractor=True)),
+                ("audio-tuned", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=True)),
+                ("best-tuned", _build_ytdlp_options("best", use_tuned_extractor=True)),
+            ]
+        )
+
+    return strategies
+
+
+def _resolve_ytdlp_cookie_file() -> str | None:
+    global _YTDLP_COOKIEFILE_CACHE
+
+    direct_cookie_file = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
+    if direct_cookie_file:
+        return direct_cookie_file
+
+    if _YTDLP_COOKIEFILE_CACHE and os.path.exists(_YTDLP_COOKIEFILE_CACHE):
+        return _YTDLP_COOKIEFILE_CACHE
+
+    cookies_b64 = os.getenv("MUSIC_BOT_YTDLP_COOKIES_B64", "").strip()
+    cookies_text = os.getenv("MUSIC_BOT_YTDLP_COOKIES_TEXT", "")
+    resolved_content: str | None = None
+
+    if cookies_b64:
+        try:
+            resolved_content = base64.b64decode(cookies_b64).decode("utf-8")
+        except Exception:
+            logger.exception("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value")
+            return None
+    elif cookies_text.strip():
+        resolved_content = cookies_text.replace("\\n", "\n")
+
+    if not resolved_content:
+        return None
+
+    cookie_tmp_dir = os.getenv("MUSIC_BOT_YTDLP_COOKIE_TMP_DIR", "").strip()
+    target_dir = cookie_tmp_dir or tempfile.gettempdir()
+    os.makedirs(target_dir, exist_ok=True)
+    cookie_path = os.path.join(target_dir, "music_bot_youtube_cookies.txt")
+    with open(cookie_path, "w", encoding="utf-8", newline="\n") as cookie_file:
+        cookie_file.write(resolved_content)
+
+    _YTDLP_COOKIEFILE_CACHE = cookie_path
+    return cookie_path
+
+
+def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any], bool]]:
+    attempts: List[tuple[str, Dict[str, Any], bool]] = []
+    strategies = _build_ytdlp_strategy_options()
+
+    def append_attempts(source_name: str, auth_options: Dict[str, Any], is_authenticated: bool) -> None:
+        for strategy_name, strategy_options in strategies:
+            options = dict(strategy_options)
+            options.update(auth_options)
+            attempts.append((f"{source_name}:{strategy_name}", options, is_authenticated))
+
+    cookies_file = _resolve_ytdlp_cookie_file()
+    if cookies_file:
+        append_attempts("cookiefile", {"cookiefile": cookies_file}, True)
+
+    cookies_from_browser = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+    seen_browser_profiles: set[tuple[str, str]] = set()
+    if cookies_from_browser:
+        for raw_entry in cookies_from_browser.split(","):
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            browser, _, profile = entry.partition(":")
+            browser = browser.strip().lower()
+            profile = profile.strip()
+            if not browser:
+                continue
+
+            dedupe_key = (browser, profile)
+            if dedupe_key in seen_browser_profiles:
+                continue
+            seen_browser_profiles.add(dedupe_key)
+
+            if profile:
+                append_attempts(
+                    f"{browser}:{profile}",
+                    {"cookiesfrombrowser": (browser, None, None, profile)},
+                    True,
+                )
+            else:
+                append_attempts(
+                    browser,
+                    {"cookiesfrombrowser": (browser,)},
+                    True,
+                )
+    else:
+        auto_browser_value = os.getenv("MUSIC_BOT_YTDLP_AUTO_COOKIES_FROM_BROWSER", "0").strip().lower()
+        auto_browser_enabled = auto_browser_value not in {"0", "false", "no", "off"}
+        if auto_browser_enabled:
+            for browser in AUTO_COOKIE_BROWSERS:
+                append_attempts(
+                    f"auto:{browser}",
+                    {"cookiesfrombrowser": (browser,)},
+                    True,
+                )
+
+    append_attempts("anonymous", {}, False)
+    return attempts
+
+
+def _looks_like_youtube_bot_check_error(error_text: str) -> bool:
+    normalized = error_text.strip().lower()
+    if any(phrase in normalized for phrase in YTDLP_BOT_CHECK_PHRASES):
+        return True
+    return "sign in to confirm" in normalized and "not a bot" in normalized
+
+
+def _looks_like_format_unavailable_error(error_text: str) -> bool:
+    normalized = error_text.strip().lower()
+    return any(phrase in normalized for phrase in YTDLP_FORMAT_UNAVAILABLE_PHRASES)
+
+
+def _normalize_format_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_manifest_stream(format_data: Dict[str, Any]) -> bool:
+    protocol = _normalize_format_value(format_data.get("protocol"))
+    ext = _normalize_format_value(format_data.get("ext"))
+    container = _normalize_format_value(format_data.get("container"))
+    format_id = _normalize_format_value(format_data.get("format_id"))
+    url = str(format_data.get("url") or "").lower()
+
+    if any(hint in protocol for hint in MANIFEST_FORMAT_HINTS):
+        return True
+    if any(hint in format_id for hint in MANIFEST_FORMAT_HINTS):
+        return True
+    if ext in {"m3u8", "mpd"} or container in {"m3u8", "mpd"}:
+        return True
+    return ".m3u8" in url or ".mpd" in url
+
+
+def _pick_preferred_direct_audio_url(info: Dict[str, Any]) -> str | None:
+    candidate_formats: List[Dict[str, Any]] = []
+    requested_formats = info.get("requested_formats") or []
+    all_formats = info.get("formats") or []
+
+    for format_entry in requested_formats:
+        if not isinstance(format_entry, dict):
+            continue
+        candidate_formats.append({**format_entry, "__requested": True})
+
+    for format_entry in all_formats:
+        if not isinstance(format_entry, dict):
+            continue
+        candidate_formats.append({**format_entry, "__requested": False})
+
+    ranked_candidates: List[tuple[tuple[float, float, float, float, float, float], str]] = []
+    for format_entry in candidate_formats:
+        url = str(format_entry.get("url") or "")
+        if not url.startswith("http"):
+            continue
+
+        if _is_manifest_stream(format_entry):
+            continue
+
+        protocol = _normalize_format_value(format_entry.get("protocol"))
+        if protocol and protocol not in {"http", "https"}:
+            continue
+
+        vcodec = _normalize_format_value(format_entry.get("vcodec"))
+        acodec = _normalize_format_value(format_entry.get("acodec"))
+        has_audio = acodec not in {"", "none"} or vcodec == "none"
+        if not has_audio:
+            continue
+
+        is_audio_only = 0.0 if vcodec == "none" else 1.0
+        is_requested = 0.0 if format_entry.get("__requested") else 1.0
+        ext = _normalize_format_value(format_entry.get("ext"))
+        ext_rank = float(PREFERRED_AUDIO_EXT_RANK.get(ext, len(PREFERRED_AUDIO_EXT_RANK) + 1))
+        abr = _safe_float(format_entry.get("abr"), 0.0)
+        tbr = _safe_float(format_entry.get("tbr"), 0.0)
+        preference = _safe_float(format_entry.get("preference"), 0.0)
+
+        rank = (
+            is_requested,
+            is_audio_only,
+            ext_rank,
+            -abr,
+            -tbr,
+            -preference,
+        )
+        ranked_candidates.append((rank, url))
+
+    if not ranked_candidates:
+        return None
+
+    ranked_candidates.sort(key=lambda item: item[0])
+    return ranked_candidates[0][1]
+
+
+def _finalize_ytdlp_info(info: Any) -> tuple[str, str]:
+    if info is None:
+        raise RuntimeError("No media info returned by yt-dlp.")
+
+    if "entries" in info:
+        entries = info.get("entries") or []
+        info = next((entry for entry in entries if entry), None)
+
+    if info is None:
+        raise RuntimeError("No playable entry found in URL.")
+
+    title = str(info.get("title") or "Unknown title")
+    preferred_stream_url = _pick_preferred_direct_audio_url(info)
+    if isinstance(preferred_stream_url, str) and preferred_stream_url:
+        return title, preferred_stream_url
+
+    stream_url = info.get("url")
+    if not isinstance(stream_url, str) or not stream_url:
+        requested_formats = info.get("requested_formats") or []
+        for item in requested_formats:
+            candidate_url = item.get("url")
+            if isinstance(candidate_url, str) and candidate_url:
+                stream_url = candidate_url
+                break
+
+    if not isinstance(stream_url, str) or not stream_url:
+        raise RuntimeError("Could not resolve stream URL.")
+
+    if ".m3u8" in stream_url.lower() or ".mpd" in stream_url.lower():
+        logger.warning(
+            "Using fallback manifest stream URL for title=%s; direct HTTP audio was unavailable.",
+            title,
+        )
+
+    return title, stream_url
+
+
+def _extract_youtube_stream(url: str, format_override: str | None = None) -> tuple[str, str]:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed on the server.")
+
+    attempts = _build_ytdlp_attempts()
+    saw_bot_check_error = False
+    saw_authenticated_bot_check_error = False
+    saw_format_unavailable_error = False
+    last_exception: Exception | None = None
+
+    for attempt_name, options, is_authenticated in attempts:
+        try:
+            current_options = dict(options)
+            if format_override:
+                current_options["format"] = format_override
+
+            with yt_dlp.YoutubeDL(current_options) as ydl:
+                info = ydl.extract_info(url, download=False)
+            return _finalize_ytdlp_info(info)
+        except Exception as exc:
+            last_exception = exc
+            error_text = str(exc)
+            if _looks_like_youtube_bot_check_error(error_text):
+                saw_bot_check_error = True
+                if is_authenticated:
+                    saw_authenticated_bot_check_error = True
+            if _looks_like_format_unavailable_error(error_text):
+                saw_format_unavailable_error = True
+            logger.warning(
+                "yt-dlp extraction attempt failed attempt=%s url=%s error=%s",
+                attempt_name,
+                url,
+                error_text,
+            )
+
+    if saw_bot_check_error:
+        configured_cookie_source = bool(
+            _resolve_ytdlp_cookie_file()
+            or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+        )
+        if configured_cookie_source and not saw_authenticated_bot_check_error and saw_format_unavailable_error:
+            raise MusicExtractionError(
+                "Your YouTube cookies were used, but yt-dlp could not resolve a playable format. "
+                "Export fresh cookies, set MUSIC_BOT_YTDLP_COOKIES_B64 again, and restart backend."
+            )
+        if configured_cookie_source:
+            raise MusicExtractionError(
+                "YouTube blocked playback even with your cookie settings. "
+                "Re-login in your browser, restart the backend, then try again."
+            )
+
+        raise MusicExtractionError(
+            "YouTube asked for bot verification. Configure MUSIC_BOT_YTDLP_COOKIES_B64 "
+            "(or MUSIC_BOT_YTDLP_COOKIES_FILE / MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER) "
+            "and restart backend."
+        )
+
+    if saw_format_unavailable_error:
+        raise MusicExtractionError(
+            "YouTube did not provide a playable stream format for this link right now. "
+            "Try another link or refresh your cookies and retry."
+        )
+
+    raise RuntimeError(f"yt-dlp failed to extract stream: {last_exception}")
 
 
 # --- REST ENDPOINTS ---
@@ -492,6 +997,66 @@ def list_voice_channel_participants(voice_channel_id: int):
     return voice_manager.participants(voice_channel_id)
 
 
+@app.get("/audio-proxy")
+async def audio_proxy(url: str):
+    # Decode the URL if it's double-encoded
+    target_url = urllib.parse.unquote(url)
+    forwarded_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "audio/*,*/*;q=0.8",
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            probe_headers = dict(forwarded_headers)
+            content_type = "audio/mpeg"
+            response_headers: Dict[str, str] = {"Accept-Ranges": "bytes"}
+
+            # Probe metadata without downloading audio body.
+            try:
+                probe = await client.head(
+                    target_url,
+                    headers=probe_headers,
+                    follow_redirects=True,
+                    timeout=10.0,
+                )
+                if 200 <= probe.status_code < 400:
+                    content_type = probe.headers.get("Content-Type", content_type)
+                    response_headers["Accept-Ranges"] = probe.headers.get("Accept-Ranges", "bytes")
+                    for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
+                        header_value = probe.headers.get(header_name)
+                        if header_value:
+                            response_headers[header_name] = header_value
+                else:
+                    logger.warning(
+                        "Audio proxy HEAD probe failed status=%s url=%s",
+                        probe.status_code,
+                        target_url,
+                    )
+            except Exception as probe_exc:
+                logger.warning("Audio proxy HEAD probe failed url=%s error=%s", target_url, probe_exc)
+
+            async def stream_audio():
+                async with client.stream(
+                    "GET",
+                    target_url,
+                    headers=forwarded_headers,
+                    follow_redirects=True,
+                    timeout=30.0,
+                ) as resp:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+
+            return StreamingResponse(
+                stream_audio(),
+                media_type=content_type,
+                headers=response_headers,
+            )
+        except Exception as e:
+            logger.error(f"Proxy error: {e}")
+            raise HTTPException(status_code=500, detail="Could not proxy audio")
+
+
 # --- WEBSOCKET ENDPOINTS ---
 
 
@@ -585,6 +1150,15 @@ async def websocket_endpoint(
                     continue
 
                 await manager.broadcast(broadcast_msg, channel_id)
+                if msg_type == "new_message":
+                    base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+                    await _handle_music_play_command(
+                        channel_id=channel_id,
+                        user_id=user_id,
+                        username=username,
+                        content=content,
+                        base_url=base_url,
+                    )
 
             except json.JSONDecodeError:
                 db_message = models.Message(content=data_str, user_id=user_id, channel_id=channel_id)
@@ -602,6 +1176,14 @@ async def websocket_endpoint(
                     }
                 )
                 await manager.broadcast(broadcast_msg, channel_id)
+                base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+                await _handle_music_play_command(
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    username=username,
+                    content=data_str,
+                    base_url=base_url,
+                )
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)

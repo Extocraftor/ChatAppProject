@@ -8,3 +8,6 @@ python-dotenv
 passlib[bcrypt]
 bcrypt==4.0.1
 gunicorn
+yt-dlp
+httpx
+spotipy

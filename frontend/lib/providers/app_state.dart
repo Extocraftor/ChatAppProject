@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -39,6 +40,7 @@ class AppState extends ChangeNotifier {
   final Map<int, MediaStream> _remoteStreams = {};
   final Map<int, RTCVideoRenderer> _remoteAudioRenderers = {};
   final Map<int, double> _voiceParticipantVolumes = {};
+  final AudioPlayer _musicPlayer = AudioPlayer();
   final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
   final Set<int> _remoteDescriptionReadyUsers = <int>{};
   Future<void> _voiceSignalProcessingQueue = Future.value();
@@ -96,6 +98,7 @@ class AppState extends ChangeNotifier {
   Message? editingMessage;
   int? highlightedMessageId;
   Timer? _highlightTimer;
+  int _nextLocalMessageId = -1;
 
   // Scrolling
   final ScrollController scrollController = ScrollController();
@@ -736,6 +739,12 @@ class AppState extends ChangeNotifier {
         final newMessage = Message.fromJson(json);
         messages.add(newMessage);
         _scrollToBottom();
+      } else if (type == 'music_bot_notice') {
+        final content = (json['content'] ?? '').toString().trim();
+        if (content.isNotEmpty) {
+          _appendLocalSystemMessage(content);
+          _scrollToBottom();
+        }
       } else if (type == 'edit_message') {
         final id = json['id'];
         final content = json['content'];
@@ -919,6 +928,11 @@ class AppState extends ChangeNotifier {
         return;
       }
 
+      if (type == 'music_play') {
+        await _handleMusicPlaySignal(payload);
+        return;
+      }
+
       if (type == 'offer') {
         await _handleOffer(payload);
         return;
@@ -940,6 +954,24 @@ class AppState extends ChangeNotifier {
       }
     } catch (_) {
       // Ignore malformed signaling payloads.
+    }
+  }
+
+  Future<void> _handleMusicPlaySignal(Map<String, dynamic> payload) async {
+    final streamUrl = payload['stream_url'];
+    if (streamUrl is! String || streamUrl.isEmpty) {
+      voiceError = "Music bot sent an invalid stream URL.";
+      notifyListeners();
+      return;
+    }
+
+    try {
+      await _musicPlayer.stop();
+      await _musicPlayer.setSource(UrlSource(streamUrl));
+      await _musicPlayer.resume();
+    } catch (error) {
+      voiceError = "Unable to start music playback: $error";
+      notifyListeners();
     }
   }
 
@@ -1330,6 +1362,7 @@ class AppState extends ChangeNotifier {
     }
     _resetVoiceDiagnostics();
     await _stopMicProbe();
+    await _musicPlayer.stop();
 
     if (signalChannel != null) {
       await signalChannel.sink.close();
@@ -2163,6 +2196,18 @@ class AppState extends ChangeNotifier {
     });
   }
 
+  void _appendLocalSystemMessage(String content) {
+    messages.add(
+      Message(
+        id: _nextLocalMessageId--,
+        userId: 0,
+        username: "Music Bot",
+        content: content,
+        timestamp: DateTime.now().toUtc().toIso8601String(),
+      ),
+    );
+  }
+
   void sendMessage(String content) {
     if (content.isEmpty || _channel == null) {
       return;
@@ -2210,6 +2255,7 @@ class AppState extends ChangeNotifier {
     _inputTestTimer?.cancel();
     _inputTestTimer = null;
     unawaited(_stopMicProbe());
+    unawaited(_musicPlayer.dispose());
     unawaited(stopInputTest(notify: false));
 
     for (final peerConnection in _peerConnections.values) {
