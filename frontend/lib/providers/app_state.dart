@@ -967,7 +967,7 @@ class AppState extends ChangeNotifier {
 
     try {
       await _musicPlayer.stop();
-      await _musicPlayer.setSourceUrl(streamUrl);
+      await _musicPlayer.setSource(UrlSource(streamUrl));
       await _musicPlayer.resume();
     } catch (error) {
       voiceError = "Unable to start music playback: $error";

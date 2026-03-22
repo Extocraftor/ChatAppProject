@@ -6,8 +6,11 @@ import os
 import re
 import tempfile
 from typing import Any, Dict, List
+import urllib.parse
 
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
@@ -315,6 +318,7 @@ async def _handle_music_play_command(
     user_id: int,
     username: str,
     content: Any,
+    base_url: str | None = None,
 ) -> None:
     if not isinstance(content, str):
         return
@@ -351,13 +355,21 @@ async def _handle_music_play_command(
         await _send_music_bot_notice(channel_id, "I couldn't load that YouTube link.")
         return
 
+    # Construct proxy URL if base_url is provided
+    final_stream_url = stream_url
+    if base_url:
+        # Ensure base_url doesn't end with slash
+        base = base_url.rstrip("/")
+        encoded_stream_url = urllib.parse.quote(stream_url, safe="")
+        final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
+
     await voice_manager.broadcast(
         voice_channel_id,
         {
             "type": "music_play",
             "title": title,
             "source_url": raw_url,
-            "stream_url": stream_url,
+            "stream_url": final_stream_url,
             "requested_by_user_id": user_id,
             "requested_by_username": username,
         },
@@ -395,7 +407,7 @@ def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
 
 
 def _build_ytdlp_options(
-    format_selector: str = "bestaudio/best",
+    format_selector: str = "bestaudio[ext=m4a]/bestaudio/best",
     use_tuned_extractor: bool = False,
 ) -> Dict[str, Any]:
     options: Dict[str, Any] = {
@@ -851,6 +863,27 @@ def list_voice_channel_participants(voice_channel_id: int):
     return voice_manager.participants(voice_channel_id)
 
 
+@app.get("/audio-proxy")
+async def audio_proxy(url: str):
+    # Decode the URL if it's double-encoded
+    target_url = urllib.parse.unquote(url)
+
+    async def stream_audio():
+        # Use a common User-Agent to avoid blocks
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                async with client.stream("GET", target_url, headers=headers, follow_redirects=True, timeout=30.0) as response:
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            except Exception as e:
+                logger.error(f"Proxy error: {e}")
+
+    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+
+
 # --- WEBSOCKET ENDPOINTS ---
 
 
@@ -945,11 +978,13 @@ async def websocket_endpoint(
 
                 await manager.broadcast(broadcast_msg, channel_id)
                 if msg_type == "new_message":
+                    base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
                     await _handle_music_play_command(
                         channel_id=channel_id,
                         user_id=user_id,
                         username=username,
                         content=content,
+                        base_url=base_url,
                     )
 
             except json.JSONDecodeError:
@@ -968,11 +1003,13 @@ async def websocket_endpoint(
                     }
                 )
                 await manager.broadcast(broadcast_msg, channel_id)
+                base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
                 await _handle_music_play_command(
                     channel_id=channel_id,
                     user_id=user_id,
                     username=username,
                     content=data_str,
+                    base_url=base_url,
                 )
 
     except WebSocketDisconnect:
