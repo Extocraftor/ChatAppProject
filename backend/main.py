@@ -104,7 +104,7 @@ def _ensure_schema_columns() -> None:
         if "admin_only" not in channel_columns:
             conn.execute(
                 text(
-                    "ALTER TABLE channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT 0"
+                    "ALTER TABLE channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT FALSE"
                 )
             )
 
@@ -118,7 +118,7 @@ def _ensure_schema_columns() -> None:
         if "admin_only" not in voice_channel_columns:
             conn.execute(
                 text(
-                    "ALTER TABLE voice_channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT 0"
+                    "ALTER TABLE voice_channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT FALSE"
                 )
             )
 
