@@ -47,6 +47,9 @@ YTDLP_BOT_CHECK_PHRASES = (
     "sign in to confirm you are not a bot",
     "use --cookies-from-browser or --cookies for the authentication",
 )
+YTDLP_FORMAT_UNAVAILABLE_PHRASES = (
+    "requested format is not available",
+)
 
 
 class MusicExtractionError(RuntimeError):
@@ -391,19 +394,12 @@ def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
     return actor_user
 
 
-def _build_ytdlp_options() -> Dict[str, Any]:
-    player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
-    player_clients = [
-        item.strip() for item in player_clients_raw.split(",") if item.strip()
-    ] or ["android", "web"]
-
-    player_skip_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_SKIP", "")
-    player_skip = [
-        item.strip() for item in player_skip_raw.split(",") if item.strip()
-    ] or ["webpage", "configs"]
-
+def _build_ytdlp_options(
+    format_selector: str = "bestaudio/best",
+    use_tuned_extractor: bool = False,
+) -> Dict[str, Any]:
     options: Dict[str, Any] = {
-        "format": "bestaudio/best",
+        "format": format_selector,
         "noplaylist": True,
         "skip_download": True,
         "quiet": True,
@@ -411,15 +407,46 @@ def _build_ytdlp_options() -> Dict[str, Any]:
         "retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 20,
-        "extractor_args": {
+    }
+
+    if use_tuned_extractor:
+        player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
+        player_clients = [
+            item.strip() for item in player_clients_raw.split(",") if item.strip()
+        ] or ["android", "web"]
+
+        player_skip_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_SKIP", "")
+        player_skip = [
+            item.strip() for item in player_skip_raw.split(",") if item.strip()
+        ] or ["webpage", "configs"]
+
+        options["extractor_args"] = {
             "youtube": {
                 "player_client": player_clients,
                 "player_skip": player_skip,
             }
-        },
-    }
+        }
 
     return options
+
+
+def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
+    strategies: List[tuple[str, Dict[str, Any]]] = [
+        ("audio-default", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=False)),
+        ("best-default", _build_ytdlp_options("best", use_tuned_extractor=False)),
+    ]
+
+    tune_enabled_value = os.getenv("MUSIC_BOT_YTDLP_ENABLE_TUNED_EXTRACTOR", "1").strip().lower()
+    tune_enabled = tune_enabled_value not in {"0", "false", "no", "off"}
+    if tune_enabled:
+        strategies.extend(
+            [
+                ("audio-tuned", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=True)),
+                ("best-tuned", _build_ytdlp_options("best", use_tuned_extractor=True)),
+            ]
+        )
+
+    return strategies
 
 
 def _resolve_ytdlp_cookie_file() -> str | None:
@@ -459,15 +486,19 @@ def _resolve_ytdlp_cookie_file() -> str | None:
     return cookie_path
 
 
-def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any]]]:
-    attempts: List[tuple[str, Dict[str, Any]]] = []
-    base_options = _build_ytdlp_options()
+def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any], bool]]:
+    attempts: List[tuple[str, Dict[str, Any], bool]] = []
+    strategies = _build_ytdlp_strategy_options()
+
+    def append_attempts(source_name: str, auth_options: Dict[str, Any], is_authenticated: bool) -> None:
+        for strategy_name, strategy_options in strategies:
+            options = dict(strategy_options)
+            options.update(auth_options)
+            attempts.append((f"{source_name}:{strategy_name}", options, is_authenticated))
 
     cookies_file = _resolve_ytdlp_cookie_file()
     if cookies_file:
-        cookie_options = dict(base_options)
-        cookie_options["cookiefile"] = cookies_file
-        attempts.append(("cookiefile", cookie_options))
+        append_attempts("cookiefile", {"cookiefile": cookies_file}, True)
 
     cookies_from_browser = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
     seen_browser_profiles: set[tuple[str, str]] = set()
@@ -487,23 +518,30 @@ def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any]]]:
                 continue
             seen_browser_profiles.add(dedupe_key)
 
-            browser_options = dict(base_options)
             if profile:
-                browser_options["cookiesfrombrowser"] = (browser, None, None, profile)
-                attempts.append((f"{browser}:{profile}", browser_options))
+                append_attempts(
+                    f"{browser}:{profile}",
+                    {"cookiesfrombrowser": (browser, None, None, profile)},
+                    True,
+                )
             else:
-                browser_options["cookiesfrombrowser"] = (browser,)
-                attempts.append((browser, browser_options))
+                append_attempts(
+                    browser,
+                    {"cookiesfrombrowser": (browser,)},
+                    True,
+                )
     else:
         auto_browser_value = os.getenv("MUSIC_BOT_YTDLP_AUTO_COOKIES_FROM_BROWSER", "0").strip().lower()
         auto_browser_enabled = auto_browser_value not in {"0", "false", "no", "off"}
         if auto_browser_enabled:
             for browser in AUTO_COOKIE_BROWSERS:
-                browser_options = dict(base_options)
-                browser_options["cookiesfrombrowser"] = (browser,)
-                attempts.append((f"auto:{browser}", browser_options))
+                append_attempts(
+                    f"auto:{browser}",
+                    {"cookiesfrombrowser": (browser,)},
+                    True,
+                )
 
-    attempts.append(("anonymous", base_options))
+    append_attempts("anonymous", {}, False)
     return attempts
 
 
@@ -512,6 +550,11 @@ def _looks_like_youtube_bot_check_error(error_text: str) -> bool:
     if any(phrase in normalized for phrase in YTDLP_BOT_CHECK_PHRASES):
         return True
     return "sign in to confirm" in normalized and "not a bot" in normalized
+
+
+def _looks_like_format_unavailable_error(error_text: str) -> bool:
+    normalized = error_text.strip().lower()
+    return any(phrase in normalized for phrase in YTDLP_FORMAT_UNAVAILABLE_PHRASES)
 
 
 def _finalize_ytdlp_info(info: Any) -> tuple[str, str]:
@@ -547,9 +590,11 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
 
     attempts = _build_ytdlp_attempts()
     saw_bot_check_error = False
+    saw_authenticated_bot_check_error = False
+    saw_format_unavailable_error = False
     last_exception: Exception | None = None
 
-    for attempt_name, options in attempts:
+    for attempt_name, options, is_authenticated in attempts:
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -559,6 +604,10 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
             error_text = str(exc)
             if _looks_like_youtube_bot_check_error(error_text):
                 saw_bot_check_error = True
+                if is_authenticated:
+                    saw_authenticated_bot_check_error = True
+            if _looks_like_format_unavailable_error(error_text):
+                saw_format_unavailable_error = True
             logger.warning(
                 "yt-dlp extraction attempt failed attempt=%s url=%s error=%s",
                 attempt_name,
@@ -571,6 +620,11 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
             _resolve_ytdlp_cookie_file()
             or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
         )
+        if configured_cookie_source and not saw_authenticated_bot_check_error and saw_format_unavailable_error:
+            raise MusicExtractionError(
+                "Your YouTube cookies were used, but yt-dlp could not resolve a playable format. "
+                "Export fresh cookies, set MUSIC_BOT_YTDLP_COOKIES_B64 again, and restart backend."
+            )
         if configured_cookie_source:
             raise MusicExtractionError(
                 "YouTube blocked playback even with your cookie settings. "
@@ -581,6 +635,12 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
             "YouTube asked for bot verification. Configure MUSIC_BOT_YTDLP_COOKIES_B64 "
             "(or MUSIC_BOT_YTDLP_COOKIES_FILE / MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER) "
             "and restart backend."
+        )
+
+    if saw_format_unavailable_error:
+        raise MusicExtractionError(
+            "YouTube did not provide a playable stream format for this link right now. "
+            "Try another link or refresh your cookies and retry."
         )
 
     raise RuntimeError(f"yt-dlp failed to extract stream: {last_exception}")
