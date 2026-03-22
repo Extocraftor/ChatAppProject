@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import json
 import logging
 import os
 import re
+import tempfile
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
@@ -49,6 +51,9 @@ YTDLP_BOT_CHECK_PHRASES = (
 
 class MusicExtractionError(RuntimeError):
     pass
+
+
+_YTDLP_COOKIEFILE_CACHE: str | None = None
 
 
 def _parse_username_set(env_name: str) -> set[str]:
@@ -417,11 +422,48 @@ def _build_ytdlp_options() -> Dict[str, Any]:
     return options
 
 
+def _resolve_ytdlp_cookie_file() -> str | None:
+    global _YTDLP_COOKIEFILE_CACHE
+
+    direct_cookie_file = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
+    if direct_cookie_file:
+        return direct_cookie_file
+
+    if _YTDLP_COOKIEFILE_CACHE and os.path.exists(_YTDLP_COOKIEFILE_CACHE):
+        return _YTDLP_COOKIEFILE_CACHE
+
+    cookies_b64 = os.getenv("MUSIC_BOT_YTDLP_COOKIES_B64", "").strip()
+    cookies_text = os.getenv("MUSIC_BOT_YTDLP_COOKIES_TEXT", "")
+    resolved_content: str | None = None
+
+    if cookies_b64:
+        try:
+            resolved_content = base64.b64decode(cookies_b64).decode("utf-8")
+        except Exception:
+            logger.exception("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value")
+            return None
+    elif cookies_text.strip():
+        resolved_content = cookies_text.replace("\\n", "\n")
+
+    if not resolved_content:
+        return None
+
+    cookie_tmp_dir = os.getenv("MUSIC_BOT_YTDLP_COOKIE_TMP_DIR", "").strip()
+    target_dir = cookie_tmp_dir or tempfile.gettempdir()
+    os.makedirs(target_dir, exist_ok=True)
+    cookie_path = os.path.join(target_dir, "music_bot_youtube_cookies.txt")
+    with open(cookie_path, "w", encoding="utf-8", newline="\n") as cookie_file:
+        cookie_file.write(resolved_content)
+
+    _YTDLP_COOKIEFILE_CACHE = cookie_path
+    return cookie_path
+
+
 def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any]]]:
     attempts: List[tuple[str, Dict[str, Any]]] = []
     base_options = _build_ytdlp_options()
 
-    cookies_file = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
+    cookies_file = _resolve_ytdlp_cookie_file()
     if cookies_file:
         cookie_options = dict(base_options)
         cookie_options["cookiefile"] = cookies_file
@@ -453,7 +495,7 @@ def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any]]]:
                 browser_options["cookiesfrombrowser"] = (browser,)
                 attempts.append((browser, browser_options))
     else:
-        auto_browser_value = os.getenv("MUSIC_BOT_YTDLP_AUTO_COOKIES_FROM_BROWSER", "1").strip().lower()
+        auto_browser_value = os.getenv("MUSIC_BOT_YTDLP_AUTO_COOKIES_FROM_BROWSER", "0").strip().lower()
         auto_browser_enabled = auto_browser_value not in {"0", "false", "no", "off"}
         if auto_browser_enabled:
             for browser in AUTO_COOKIE_BROWSERS:
@@ -526,7 +568,7 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
 
     if saw_bot_check_error:
         configured_cookie_source = bool(
-            os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
+            _resolve_ytdlp_cookie_file()
             or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
         )
         if configured_cookie_source:
@@ -536,8 +578,9 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
             )
 
         raise MusicExtractionError(
-            "YouTube asked for bot verification. Set MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER="
-            "edge (or chrome:Default) in .env, then restart backend."
+            "YouTube asked for bot verification. Configure MUSIC_BOT_YTDLP_COOKIES_B64 "
+            "(or MUSIC_BOT_YTDLP_COOKIES_FILE / MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER) "
+            "and restart backend."
         )
 
     raise RuntimeError(f"yt-dlp failed to extract stream: {last_exception}")
