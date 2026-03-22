@@ -342,7 +342,7 @@ async def _handle_music_play_command(
 
     # Determine extraction strategy
     extraction_url = raw_url
-    is_spotify = bool(SPOTIPY_URL_PATTERN.match(raw_url))
+    is_spotify = bool(SPOTIFY_URL_PATTERN.match(raw_url))
     is_soundcloud = bool(SOUNDCLOUD_URL_PATTERN.match(raw_url))
     is_youtube = bool(YOUTUBE_URL_PATTERN.match(raw_url))
 
