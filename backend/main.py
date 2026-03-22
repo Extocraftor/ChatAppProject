@@ -41,7 +41,7 @@ ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
 PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
 YOUTUBE_URL_PATTERN = re.compile(
-    r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$",
+    r"^(https?://)?((www|m|music)\.)?(youtube\.com|youtu\.be)/.+$",
     re.IGNORECASE,
 )
 SPOTIFY_URL_PATTERN = re.compile(
@@ -49,7 +49,7 @@ SPOTIFY_URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SOUNDCLOUD_URL_PATTERN = re.compile(
-    r"^(https?://)?(www\.)?(soundcloud\.com)/.+$",
+    r"^(https?://)?((www|m|on)\.)?(soundcloud\.com|snd\.sc)/.+$",
     re.IGNORECASE,
 )
 AUTO_COOKIE_BROWSERS = ("edge", "chrome", "brave", "firefox")
@@ -61,6 +61,11 @@ YTDLP_BOT_CHECK_PHRASES = (
 YTDLP_FORMAT_UNAVAILABLE_PHRASES = (
     "requested format is not available",
 )
+MANIFEST_FORMAT_HINTS = ("m3u8", "hls", "dash", "f4m", "ism")
+PREFERRED_AUDIO_EXT_ORDER = ("mp3", "m4a", "aac", "opus", "ogg", "webm", "wav")
+PREFERRED_AUDIO_EXT_RANK = {
+    ext: rank for rank, ext in enumerate(PREFERRED_AUDIO_EXT_ORDER)
+}
 
 
 class MusicExtractionError(RuntimeError):
@@ -346,14 +351,20 @@ async def _handle_music_play_command(
     is_soundcloud = bool(SOUNDCLOUD_URL_PATTERN.match(raw_url))
     is_youtube = bool(YOUTUBE_URL_PATTERN.match(raw_url))
 
+    # Specific format for SoundCloud to avoid HLS/m3u8
+    custom_format = None
+    if is_soundcloud:
+        custom_format = (
+            "http_mp3_128_url/http_aac_160_url/"
+            "bestaudio[protocol^=http][ext=mp3]/"
+            "bestaudio[protocol^=http][ext=m4a]/"
+            "bestaudio[protocol^=http][acodec!=none][vcodec=none]/"
+            "bestaudio[protocol^=http]/bestaudio/best"
+        )
+
     if is_spotify:
-        # For Spotify, we search YouTube for the track
-        # In a real app, you'd use spotipy to get the track name first
-        # But for now, we'll let yt-dlp handle the search if possible, 
-        # or just try to extract metadata if it's a known URL
         extraction_url = f"ytsearch1:{raw_url}"
     elif not is_youtube and not is_soundcloud:
-        # If it's not a direct link, treat it as a search query on YouTube
         extraction_url = f"ytsearch1:{raw_url}"
 
     voice_channel_id = voice_manager.find_channel_for_user(user_id)
@@ -365,7 +376,7 @@ async def _handle_music_play_command(
         return
 
     try:
-        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, extraction_url)
+        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, extraction_url, format_override=custom_format)
     except MusicExtractionError as exc:
         logger.warning("music extraction blocked user=%s url=%s error=%s", user_id, raw_url, exc)
         await _send_music_bot_notice(channel_id, str(exc))
@@ -465,6 +476,7 @@ def _build_ytdlp_options(
 
 def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
     strategies: List[tuple[str, Dict[str, Any]]] = [
+        ("audio-http-direct", _build_ytdlp_options(use_tuned_extractor=False)),
         ("audio-default", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=False)),
         ("best-default", _build_ytdlp_options("best", use_tuned_extractor=False)),
     ]
@@ -474,6 +486,7 @@ def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
     if tune_enabled:
         strategies.extend(
             [
+                ("audio-http-direct-tuned", _build_ytdlp_options(use_tuned_extractor=True)),
                 ("audio-tuned", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=True)),
                 ("best-tuned", _build_ytdlp_options("best", use_tuned_extractor=True)),
             ]
@@ -590,6 +603,92 @@ def _looks_like_format_unavailable_error(error_text: str) -> bool:
     return any(phrase in normalized for phrase in YTDLP_FORMAT_UNAVAILABLE_PHRASES)
 
 
+def _normalize_format_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_manifest_stream(format_data: Dict[str, Any]) -> bool:
+    protocol = _normalize_format_value(format_data.get("protocol"))
+    ext = _normalize_format_value(format_data.get("ext"))
+    container = _normalize_format_value(format_data.get("container"))
+    format_id = _normalize_format_value(format_data.get("format_id"))
+    url = str(format_data.get("url") or "").lower()
+
+    if any(hint in protocol for hint in MANIFEST_FORMAT_HINTS):
+        return True
+    if any(hint in format_id for hint in MANIFEST_FORMAT_HINTS):
+        return True
+    if ext in {"m3u8", "mpd"} or container in {"m3u8", "mpd"}:
+        return True
+    return ".m3u8" in url or ".mpd" in url
+
+
+def _pick_preferred_direct_audio_url(info: Dict[str, Any]) -> str | None:
+    candidate_formats: List[Dict[str, Any]] = []
+    requested_formats = info.get("requested_formats") or []
+    all_formats = info.get("formats") or []
+
+    for format_entry in requested_formats:
+        if not isinstance(format_entry, dict):
+            continue
+        candidate_formats.append({**format_entry, "__requested": True})
+
+    for format_entry in all_formats:
+        if not isinstance(format_entry, dict):
+            continue
+        candidate_formats.append({**format_entry, "__requested": False})
+
+    ranked_candidates: List[tuple[tuple[float, float, float, float, float, float], str]] = []
+    for format_entry in candidate_formats:
+        url = str(format_entry.get("url") or "")
+        if not url.startswith("http"):
+            continue
+
+        if _is_manifest_stream(format_entry):
+            continue
+
+        protocol = _normalize_format_value(format_entry.get("protocol"))
+        if protocol and protocol not in {"http", "https"}:
+            continue
+
+        vcodec = _normalize_format_value(format_entry.get("vcodec"))
+        acodec = _normalize_format_value(format_entry.get("acodec"))
+        has_audio = acodec not in {"", "none"} or vcodec == "none"
+        if not has_audio:
+            continue
+
+        is_audio_only = 0.0 if vcodec == "none" else 1.0
+        is_requested = 0.0 if format_entry.get("__requested") else 1.0
+        ext = _normalize_format_value(format_entry.get("ext"))
+        ext_rank = float(PREFERRED_AUDIO_EXT_RANK.get(ext, len(PREFERRED_AUDIO_EXT_RANK) + 1))
+        abr = _safe_float(format_entry.get("abr"), 0.0)
+        tbr = _safe_float(format_entry.get("tbr"), 0.0)
+        preference = _safe_float(format_entry.get("preference"), 0.0)
+
+        rank = (
+            is_requested,
+            is_audio_only,
+            ext_rank,
+            -abr,
+            -tbr,
+            -preference,
+        )
+        ranked_candidates.append((rank, url))
+
+    if not ranked_candidates:
+        return None
+
+    ranked_candidates.sort(key=lambda item: item[0])
+    return ranked_candidates[0][1]
+
+
 def _finalize_ytdlp_info(info: Any) -> tuple[str, str]:
     if info is None:
         raise RuntimeError("No media info returned by yt-dlp.")
@@ -602,6 +701,10 @@ def _finalize_ytdlp_info(info: Any) -> tuple[str, str]:
         raise RuntimeError("No playable entry found in URL.")
 
     title = str(info.get("title") or "Unknown title")
+    preferred_stream_url = _pick_preferred_direct_audio_url(info)
+    if isinstance(preferred_stream_url, str) and preferred_stream_url:
+        return title, preferred_stream_url
+
     stream_url = info.get("url")
     if not isinstance(stream_url, str) or not stream_url:
         requested_formats = info.get("requested_formats") or []
@@ -614,10 +717,16 @@ def _finalize_ytdlp_info(info: Any) -> tuple[str, str]:
     if not isinstance(stream_url, str) or not stream_url:
         raise RuntimeError("Could not resolve stream URL.")
 
+    if ".m3u8" in stream_url.lower() or ".mpd" in stream_url.lower():
+        logger.warning(
+            "Using fallback manifest stream URL for title=%s; direct HTTP audio was unavailable.",
+            title,
+        )
+
     return title, stream_url
 
 
-def _extract_youtube_stream(url: str) -> tuple[str, str]:
+def _extract_youtube_stream(url: str, format_override: str | None = None) -> tuple[str, str]:
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed on the server.")
 
@@ -629,7 +738,11 @@ def _extract_youtube_stream(url: str) -> tuple[str, str]:
 
     for attempt_name, options, is_authenticated in attempts:
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:
+            current_options = dict(options)
+            if format_override:
+                current_options["format"] = format_override
+
+            with yt_dlp.YoutubeDL(current_options) as ydl:
                 info = ydl.extract_info(url, download=False)
             return _finalize_ytdlp_info(info)
         except Exception as exc:
@@ -888,26 +1001,57 @@ def list_voice_channel_participants(voice_channel_id: int):
 async def audio_proxy(url: str):
     # Decode the URL if it's double-encoded
     target_url = urllib.parse.unquote(url)
+    forwarded_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "audio/*,*/*;q=0.8",
+    }
 
     async with httpx.AsyncClient() as client:
         try:
-            # We open the stream but don't read the body yet
-            # follow_redirects=True is important as YouTube/SoundCloud URLs often redirect
-            response = await client.get(target_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }, follow_redirects=True, timeout=10.0)
-            
-            # Relay the original content type if available
-            content_type = response.headers.get("Content-Type", "audio/mpeg")
+            probe_headers = dict(forwarded_headers)
+            content_type = "audio/mpeg"
+            response_headers: Dict[str, str] = {"Accept-Ranges": "bytes"}
+
+            # Probe metadata without downloading audio body.
+            try:
+                probe = await client.head(
+                    target_url,
+                    headers=probe_headers,
+                    follow_redirects=True,
+                    timeout=10.0,
+                )
+                if 200 <= probe.status_code < 400:
+                    content_type = probe.headers.get("Content-Type", content_type)
+                    response_headers["Accept-Ranges"] = probe.headers.get("Accept-Ranges", "bytes")
+                    for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
+                        header_value = probe.headers.get(header_name)
+                        if header_value:
+                            response_headers[header_name] = header_value
+                else:
+                    logger.warning(
+                        "Audio proxy HEAD probe failed status=%s url=%s",
+                        probe.status_code,
+                        target_url,
+                    )
+            except Exception as probe_exc:
+                logger.warning("Audio proxy HEAD probe failed url=%s error=%s", target_url, probe_exc)
 
             async def stream_audio():
-                async with client.stream("GET", target_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                }, follow_redirects=True, timeout=30.0) as resp:
+                async with client.stream(
+                    "GET",
+                    target_url,
+                    headers=forwarded_headers,
+                    follow_redirects=True,
+                    timeout=30.0,
+                ) as resp:
                     async for chunk in resp.aiter_bytes():
                         yield chunk
 
-            return StreamingResponse(stream_audio(), media_type=content_type)
+            return StreamingResponse(
+                stream_audio(),
+                media_type=content_type,
+                headers=response_headers,
+            )
         except Exception as e:
             logger.error(f"Proxy error: {e}")
             raise HTTPException(status_code=500, detail="Could not proxy audio")
