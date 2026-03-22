@@ -416,16 +416,16 @@ def _build_ytdlp_options(
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
-        "retries": 3,
-        "extractor_retries": 3,
-        "socket_timeout": 20,
+        "retries": 5,
+        "extractor_retries": 5,
+        "socket_timeout": 30,
     }
 
     if use_tuned_extractor:
         player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
         player_clients = [
             item.strip() for item in player_clients_raw.split(",") if item.strip()
-        ] or ["android", "web"]
+        ] or ["ios", "android", "web"]
 
         player_skip_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_SKIP", "")
         player_skip = [
