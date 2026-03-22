@@ -44,6 +44,14 @@ YOUTUBE_URL_PATTERN = re.compile(
     r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$",
     re.IGNORECASE,
 )
+SPOTIFY_URL_PATTERN = re.compile(
+    r"^(https?://)?(open\.spotify\.com/track/)(?P<id>[a-zA-Z0-9]+).*$",
+    re.IGNORECASE,
+)
+SOUNDCLOUD_URL_PATTERN = re.compile(
+    r"^(https?://)?(www\.)?(soundcloud\.com)/.+$",
+    re.IGNORECASE,
+)
 AUTO_COOKIE_BROWSERS = ("edge", "chrome", "brave", "firefox")
 YTDLP_BOT_CHECK_PHRASES = (
     "sign in to confirm you're not a bot",
@@ -329,36 +337,48 @@ async def _handle_music_play_command(
 
     raw_url = (command_match.group("url") or "").strip().strip("<>")
     if not raw_url:
-        await _send_music_bot_notice(channel_id, "Usage: play <youtube_url>")
+        await _send_music_bot_notice(channel_id, "Usage: play <url or song name>")
         return
 
-    if not YOUTUBE_URL_PATTERN.match(raw_url):
-        await _send_music_bot_notice(channel_id, "Only YouTube links are supported for now.")
-        return
+    # Determine extraction strategy
+    extraction_url = raw_url
+    is_spotify = bool(SPOTIPY_URL_PATTERN.match(raw_url))
+    is_soundcloud = bool(SOUNDCLOUD_URL_PATTERN.match(raw_url))
+    is_youtube = bool(YOUTUBE_URL_PATTERN.match(raw_url))
+
+    if is_spotify:
+        # For Spotify, we search YouTube for the track
+        # In a real app, you'd use spotipy to get the track name first
+        # But for now, we'll let yt-dlp handle the search if possible, 
+        # or just try to extract metadata if it's a known URL
+        extraction_url = f"ytsearch1:{raw_url}"
+    elif not is_youtube and not is_soundcloud:
+        # If it's not a direct link, treat it as a search query on YouTube
+        extraction_url = f"ytsearch1:{raw_url}"
 
     voice_channel_id = voice_manager.find_channel_for_user(user_id)
     if voice_channel_id is None:
         await _send_music_bot_notice(
             channel_id,
-            "Join a voice channel first, then use play <youtube_url>.",
+            "Join a voice channel first, then use play <url>.",
         )
         return
 
     try:
-        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, raw_url)
+        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, extraction_url)
     except MusicExtractionError as exc:
         logger.warning("music extraction blocked user=%s url=%s error=%s", user_id, raw_url, exc)
         await _send_music_bot_notice(channel_id, str(exc))
         return
     except Exception:
         logger.exception("music command failed user=%s url=%s", user_id, raw_url)
-        await _send_music_bot_notice(channel_id, "I couldn't load that YouTube link.")
+        await _send_music_bot_notice(channel_id, "I couldn't load that link.")
         return
 
     # Construct proxy URL if base_url is provided
+    # Proxying is generally safer for YouTube/SoundCloud
     final_stream_url = stream_url
     if base_url:
-        # Ensure base_url doesn't end with slash
         base = base_url.rstrip("/")
         encoded_stream_url = urllib.parse.quote(stream_url, safe="")
         final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
@@ -377,7 +397,7 @@ async def _handle_music_play_command(
 
     await _send_music_bot_notice(
         channel_id,
-        f"Now playing in voice: {title}",
+        f"Now playing: {title}",
     )
 
 
@@ -419,6 +439,7 @@ def _build_ytdlp_options(
         "retries": 5,
         "extractor_retries": 5,
         "socket_timeout": 30,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
     if use_tuned_extractor:
