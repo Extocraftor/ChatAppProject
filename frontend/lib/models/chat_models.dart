@@ -210,3 +210,57 @@ class UserChannelPermissions {
     );
   }
 }
+
+class ChannelUserVisibility {
+  final int userId;
+  final String username;
+  final String role;
+  final bool canView;
+
+  ChannelUserVisibility({
+    required this.userId,
+    required this.username,
+    required this.role,
+    required this.canView,
+  });
+
+  factory ChannelUserVisibility.fromJson(Map<String, dynamic> json) {
+    return ChannelUserVisibility(
+      userId: json['user_id'],
+      username: json['username'] ?? "Unknown user",
+      role: json['role'] ?? "member",
+      canView: json['can_view'] == true,
+    );
+  }
+}
+
+class ChannelPermissions {
+  final int channelId;
+  final String channelName;
+  final String channelType;
+  final List<ChannelUserVisibility> users;
+
+  ChannelPermissions({
+    required this.channelId,
+    required this.channelName,
+    required this.channelType,
+    required this.users,
+  });
+
+  factory ChannelPermissions.fromJson(Map<String, dynamic> json) {
+    final users = (json['users'] as List<dynamic>? ?? [])
+        .whereType<Map<dynamic, dynamic>>()
+        .map(
+          (item) => ChannelUserVisibility.fromJson(
+            Map<String, dynamic>.from(item),
+          ),
+        )
+        .toList();
+    return ChannelPermissions(
+      channelId: json['channel_id'],
+      channelName: json['channel_name'] ?? "Unknown channel",
+      channelType: json['channel_type'] ?? "text",
+      users: users,
+    );
+  }
+}

@@ -836,6 +836,90 @@ def _build_user_channel_permissions_response(
     )
 
 
+def _build_text_channel_permissions_response(
+    db: Session,
+    channel: models.Channel,
+) -> schemas.ChannelPermissionsSchema:
+    _ensure_permissions_for_new_text_channel(
+        db,
+        channel.id,
+        admin_only=bool(channel.admin_only),
+    )
+
+    users = db.query(models.User).order_by(models.User.username.asc()).all()
+    permission_map = {
+        permission.user_id: permission.can_view
+        for permission in db.query(models.TextChannelPermission)
+        .filter(models.TextChannelPermission.channel_id == channel.id)
+        .all()
+    }
+
+    return schemas.ChannelPermissionsSchema(
+        channel_id=channel.id,
+        channel_name=channel.name,
+        channel_type="text",
+        users=[
+            schemas.ChannelUserVisibilitySchema(
+                user_id=user.id,
+                username=user.username,
+                role=user.role,
+                can_view=True
+                if _is_admin(user)
+                else permission_map.get(
+                    user.id,
+                    _default_channel_visibility_for_role(
+                        user.role,
+                        bool(channel.admin_only),
+                    ),
+                ),
+            )
+            for user in users
+        ],
+    )
+
+
+def _build_voice_channel_permissions_response(
+    db: Session,
+    channel: models.VoiceChannel,
+) -> schemas.ChannelPermissionsSchema:
+    _ensure_permissions_for_new_voice_channel(
+        db,
+        channel.id,
+        admin_only=bool(channel.admin_only),
+    )
+
+    users = db.query(models.User).order_by(models.User.username.asc()).all()
+    permission_map = {
+        permission.user_id: permission.can_view
+        for permission in db.query(models.VoiceChannelPermission)
+        .filter(models.VoiceChannelPermission.channel_id == channel.id)
+        .all()
+    }
+
+    return schemas.ChannelPermissionsSchema(
+        channel_id=channel.id,
+        channel_name=channel.name,
+        channel_type="voice",
+        users=[
+            schemas.ChannelUserVisibilitySchema(
+                user_id=user.id,
+                username=user.username,
+                role=user.role,
+                can_view=True
+                if _is_admin(user)
+                else permission_map.get(
+                    user.id,
+                    _default_channel_visibility_for_role(
+                        user.role,
+                        bool(channel.admin_only),
+                    ),
+                ),
+            )
+            for user in users
+        ],
+    )
+
+
 _backfill_default_channel_permissions()
 
 
@@ -1347,6 +1431,164 @@ def admin_update_user_permissions(
     return _build_user_channel_permissions_response(db, target_user)
 
 
+@app.get(
+    "/admin/channels/{channel_id}/permissions",
+    response_model=schemas.ChannelPermissionsSchema,
+)
+def admin_get_text_channel_permissions(
+    channel_id: int,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    _ensure_admin_actor(db, actor_user_id)
+    channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Text channel not found")
+    return _build_text_channel_permissions_response(db, channel)
+
+
+@app.patch(
+    "/admin/channels/{channel_id}/permissions",
+    response_model=schemas.ChannelPermissionsSchema,
+)
+def admin_update_text_channel_permissions(
+    channel_id: int,
+    permission_update: schemas.ChannelPermissionsUpdate,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    _ensure_admin_actor(db, actor_user_id)
+    channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Text channel not found")
+
+    _ensure_permissions_for_new_text_channel(
+        db,
+        channel.id,
+        admin_only=bool(channel.admin_only),
+    )
+
+    if permission_update.user_permissions:
+        valid_user_ids = {row[0] for row in db.query(models.User.id).all()}
+        for target_user_id, can_view in permission_update.user_permissions.items():
+            if target_user_id not in valid_user_ids:
+                raise HTTPException(status_code=404, detail=f"User {target_user_id} not found")
+
+            target_user = (
+                db.query(models.User).filter(models.User.id == target_user_id).first()
+            )
+            if not target_user:
+                raise HTTPException(status_code=404, detail=f"User {target_user_id} not found")
+            if _is_admin(target_user):
+                continue
+
+            permission = (
+                db.query(models.TextChannelPermission)
+                .filter(
+                    models.TextChannelPermission.user_id == target_user_id,
+                    models.TextChannelPermission.channel_id == channel_id,
+                )
+                .first()
+            )
+            if not permission:
+                permission = models.TextChannelPermission(
+                    user_id=target_user_id,
+                    channel_id=channel_id,
+                    can_view=_default_channel_visibility_for_role(
+                        target_user.role,
+                        bool(channel.admin_only),
+                    ),
+                )
+                db.add(permission)
+            permission.can_view = bool(can_view)
+
+    db.commit()
+    return _build_text_channel_permissions_response(db, channel)
+
+
+@app.get(
+    "/admin/voice-channels/{voice_channel_id}/permissions",
+    response_model=schemas.ChannelPermissionsSchema,
+)
+def admin_get_voice_channel_permissions(
+    voice_channel_id: int,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    _ensure_admin_actor(db, actor_user_id)
+    channel = (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.id == voice_channel_id)
+        .first()
+    )
+    if not channel:
+        raise HTTPException(status_code=404, detail="Voice channel not found")
+    return _build_voice_channel_permissions_response(db, channel)
+
+
+@app.patch(
+    "/admin/voice-channels/{voice_channel_id}/permissions",
+    response_model=schemas.ChannelPermissionsSchema,
+)
+def admin_update_voice_channel_permissions(
+    voice_channel_id: int,
+    permission_update: schemas.ChannelPermissionsUpdate,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    _ensure_admin_actor(db, actor_user_id)
+    channel = (
+        db.query(models.VoiceChannel)
+        .filter(models.VoiceChannel.id == voice_channel_id)
+        .first()
+    )
+    if not channel:
+        raise HTTPException(status_code=404, detail="Voice channel not found")
+
+    _ensure_permissions_for_new_voice_channel(
+        db,
+        channel.id,
+        admin_only=bool(channel.admin_only),
+    )
+
+    if permission_update.user_permissions:
+        valid_user_ids = {row[0] for row in db.query(models.User.id).all()}
+        for target_user_id, can_view in permission_update.user_permissions.items():
+            if target_user_id not in valid_user_ids:
+                raise HTTPException(status_code=404, detail=f"User {target_user_id} not found")
+
+            target_user = (
+                db.query(models.User).filter(models.User.id == target_user_id).first()
+            )
+            if not target_user:
+                raise HTTPException(status_code=404, detail=f"User {target_user_id} not found")
+            if _is_admin(target_user):
+                continue
+
+            permission = (
+                db.query(models.VoiceChannelPermission)
+                .filter(
+                    models.VoiceChannelPermission.user_id == target_user_id,
+                    models.VoiceChannelPermission.channel_id == voice_channel_id,
+                )
+                .first()
+            )
+            if not permission:
+                permission = models.VoiceChannelPermission(
+                    user_id=target_user_id,
+                    channel_id=voice_channel_id,
+                    can_view=_default_channel_visibility_for_role(
+                        target_user.role,
+                        bool(channel.admin_only),
+                    ),
+                )
+                db.add(permission)
+            permission.can_view = bool(can_view)
+
+    db.commit()
+    return _build_voice_channel_permissions_response(db, channel)
+
+
 @app.post("/login/", response_model=schemas.UserSchema)
 def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
@@ -1363,9 +1605,19 @@ def create_channel(
 ):
     actor_user = None
     creator_user_id = None
-    if actor_user_id is not None:
-        actor_user = _ensure_actor_user(db, actor_user_id)
-        creator_user_id = actor_user.id
+    if actor_user_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Only moderators/admins can create channels",
+        )
+
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    creator_user_id = actor_user.id
+    if not _is_staff(actor_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only moderators/admins can create channels",
+        )
     if channel.admin_only and (actor_user is None or not _is_admin(actor_user)):
         raise HTTPException(
             status_code=403,
@@ -1467,9 +1719,19 @@ def create_voice_channel(
 ):
     actor_user = None
     creator_user_id = None
-    if actor_user_id is not None:
-        actor_user = _ensure_actor_user(db, actor_user_id)
-        creator_user_id = actor_user.id
+    if actor_user_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Only moderators/admins can create channels",
+        )
+
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    creator_user_id = actor_user.id
+    if not _is_staff(actor_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only moderators/admins can create channels",
+        )
     if channel.admin_only and (actor_user is None or not _is_admin(actor_user)):
         raise HTTPException(
             status_code=403,

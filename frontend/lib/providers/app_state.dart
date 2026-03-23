@@ -170,6 +170,7 @@ class AppState extends ChangeNotifier {
     final role = currentUser?.role.toLowerCase();
     return role == "admin" || role == "moderator";
   }
+  bool get canCreateChannels => canModerateChannels;
   bool canDeleteTextChannel(Channel channel) {
     final userId = currentUser?.id;
     if (userId == null) {
@@ -506,13 +507,121 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<ChannelPermissions?> fetchTextChannelPermissionsAsAdmin(
+    int channelId,
+  ) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      return null;
+    }
+
+    try {
+      final response = await http.get(
+        Uri.parse(
+          "$baseUrl/admin/channels/$channelId/permissions?actor_user_id=$userId",
+        ),
+      );
+      if (response.statusCode != 200) {
+        return null;
+      }
+      return ChannelPermissions.fromJson(jsonDecode(response.body));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ChannelPermissions?> fetchVoiceChannelPermissionsAsAdmin(
+    int channelId,
+  ) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      return null;
+    }
+
+    try {
+      final response = await http.get(
+        Uri.parse(
+          "$baseUrl/admin/voice-channels/$channelId/permissions?actor_user_id=$userId",
+        ),
+      );
+      if (response.statusCode != 200) {
+        return null;
+      }
+      return ChannelPermissions.fromJson(jsonDecode(response.body));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ChannelPermissions?> updateTextChannelUserVisibilityAsAdmin({
+    required int channelId,
+    required int targetUserId,
+    required bool canView,
+  }) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      return null;
+    }
+
+    try {
+      final response = await http.patch(
+        Uri.parse(
+          "$baseUrl/admin/channels/$channelId/permissions?actor_user_id=$userId",
+        ),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_permissions": {
+            targetUserId.toString(): canView,
+          },
+        }),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      return ChannelPermissions.fromJson(jsonDecode(response.body));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<ChannelPermissions?> updateVoiceChannelUserVisibilityAsAdmin({
+    required int channelId,
+    required int targetUserId,
+    required bool canView,
+  }) async {
+    final userId = currentUser?.id;
+    if (userId == null || !isAdmin) {
+      return null;
+    }
+
+    try {
+      final response = await http.patch(
+        Uri.parse(
+          "$baseUrl/admin/voice-channels/$channelId/permissions?actor_user_id=$userId",
+        ),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_permissions": {
+            targetUserId.toString(): canView,
+          },
+        }),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      return ChannelPermissions.fromJson(jsonDecode(response.body));
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> createChannel(
     String name,
     String? description, {
     bool adminOnly = false,
   }) async {
     final userId = currentUser?.id;
-    if (userId == null) {
+    if (userId == null || !canCreateChannels) {
       return false;
     }
 
@@ -544,7 +653,7 @@ class AppState extends ChangeNotifier {
     bool adminOnly = false,
   }) async {
     final userId = currentUser?.id;
-    if (userId == null) {
+    if (userId == null || !canCreateChannels) {
       return false;
     }
 

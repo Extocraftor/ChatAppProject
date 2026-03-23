@@ -99,3 +99,21 @@ class UserChannelPermissionsSchema(BaseModel):
 class UserChannelPermissionsUpdate(BaseModel):
     text_channel_permissions: Dict[int, bool] = {}
     voice_channel_permissions: Dict[int, bool] = {}
+
+
+class ChannelUserVisibilitySchema(BaseModel):
+    user_id: int
+    username: str
+    role: str
+    can_view: bool
+
+
+class ChannelPermissionsSchema(BaseModel):
+    channel_id: int
+    channel_name: str
+    channel_type: Literal["text", "voice"]
+    users: List[ChannelUserVisibilitySchema]
+
+
+class ChannelPermissionsUpdate(BaseModel):
+    user_permissions: Dict[int, bool] = {}

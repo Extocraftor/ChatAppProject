@@ -168,6 +168,7 @@ class _SidebarState extends State<Sidebar> {
     required String title,
     required IconData icon,
     required VoidCallback onAdd,
+    bool canAdd = true,
   }) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
@@ -186,13 +187,14 @@ class _SidebarState extends State<Sidebar> {
               ),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.add, size: 16, color: Colors.grey),
-            onPressed: onAdd,
-            tooltip: "Create",
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-          ),
+          if (canAdd)
+            IconButton(
+              icon: const Icon(Icons.add, size: 16, color: Colors.grey),
+              onPressed: onAdd,
+              tooltip: "Create",
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
         ],
       ),
     );
@@ -274,6 +276,42 @@ class _SidebarState extends State<Sidebar> {
         const SnackBar(content: Text("Unable to delete voice channel")),
       );
     }
+  }
+
+  Future<void> _showTextChannelSettingsDialog(
+    BuildContext context,
+    AppState state,
+    Channel channel,
+  ) async {
+    if (!state.isAdmin) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _ChannelSettingsDialog(
+        channelId: channel.id,
+        channelName: channel.name,
+        isVoiceChannel: false,
+      ),
+    );
+  }
+
+  Future<void> _showVoiceChannelSettingsDialog(
+    BuildContext context,
+    AppState state,
+    VoiceChannel channel,
+  ) async {
+    if (!state.isAdmin) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _ChannelSettingsDialog(
+        channelId: channel.id,
+        channelName: channel.name,
+        isVoiceChannel: true,
+      ),
+    );
   }
 
   Widget _voiceParticipantTile(
@@ -455,10 +493,48 @@ class _SidebarState extends State<Sidebar> {
                   icon: Icons.tag,
                   onAdd: () =>
                       _showCreateChannelDialog(context, state, isVoice: false),
+                  canAdd: state.canCreateChannels,
                 ),
                 ...state.channels.map((channel) {
                   final isActive = state.activeChannel?.id == channel.id;
                   final canDeleteChannel = state.canDeleteTextChannel(channel);
+                  final canOpenSettings = state.isAdmin;
+
+                  final trailingActions = <Widget>[
+                    if (canOpenSettings)
+                      IconButton(
+                        icon: const Icon(
+                          Icons.tune,
+                          size: 18,
+                          color: Colors.lightBlueAccent,
+                        ),
+                        tooltip: "Channel settings",
+                        onPressed: () => _showTextChannelSettingsDialog(
+                          context,
+                          state,
+                          channel,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    if (canDeleteChannel)
+                      IconButton(
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          size: 18,
+                          color: Colors.redAccent,
+                        ),
+                        tooltip: "Delete channel",
+                        onPressed: () => _showDeleteTextChannelDialog(
+                          context,
+                          state,
+                          channel,
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                  ];
+
                   return Material(
                     type: MaterialType.transparency,
                     child: ListTile(
@@ -473,21 +549,15 @@ class _SidebarState extends State<Sidebar> {
                       onTap: () => state.selectChannel(channel),
                       selected: isActive,
                       selectedTileColor: const Color(0xFF40444B),
-                      trailing: canDeleteChannel
-                          ? IconButton(
-                              icon: const Icon(
-                                Icons.delete_outline,
-                                size: 18,
-                                color: Colors.redAccent,
+                      trailing: trailingActions.isEmpty
+                          ? null
+                          : SizedBox(
+                              width: 28.0 * trailingActions.length,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: trailingActions,
                               ),
-                              tooltip: "Delete channel",
-                              onPressed: () => _showDeleteTextChannelDialog(
-                                context,
-                                state,
-                                channel,
-                              ),
-                            )
-                          : null,
+                            ),
                     ),
                   );
                 }),
@@ -497,10 +567,12 @@ class _SidebarState extends State<Sidebar> {
                   icon: Icons.volume_up,
                   onAdd: () =>
                       _showCreateChannelDialog(context, state, isVoice: true),
+                  canAdd: state.canCreateChannels,
                 ),
                 ...state.voiceChannels.map((channel) {
                   final isActive = state.activeVoiceChannel?.id == channel.id;
                   final canDeleteChannel = state.canDeleteVoiceChannel(channel);
+                  final canOpenSettings = state.isAdmin;
                   final participants =
                       isActive ? state.voiceParticipants.values.toList() : <VoiceParticipant>[];
                   if (isActive) {
@@ -519,51 +591,99 @@ class _SidebarState extends State<Sidebar> {
 
                   Widget? trailing;
                   if (isActive) {
+                    final activeActions = <Widget>[
+                      if (canOpenSettings)
+                        IconButton(
+                          icon: const Icon(
+                            Icons.tune,
+                            color: Colors.lightBlueAccent,
+                            size: 18,
+                          ),
+                          tooltip: "Channel settings",
+                          onPressed: () => _showVoiceChannelSettingsDialog(
+                            context,
+                            state,
+                            channel,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                      if (canDeleteChannel)
+                        IconButton(
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Colors.redAccent,
+                            size: 18,
+                          ),
+                          tooltip: "Delete channel",
+                          onPressed: () => _showDeleteVoiceChannelDialog(
+                            context,
+                            state,
+                            channel,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.call_end,
+                          color: Colors.redAccent,
+                          size: 18,
+                        ),
+                        tooltip: "Leave voice channel",
+                        onPressed: () => state.leaveVoiceChannel(),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ];
                     trailing = SizedBox(
-                      width: canDeleteChannel ? 56 : 28,
+                      width: 28.0 * activeActions.length,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (canDeleteChannel)
-                            IconButton(
-                              icon: const Icon(
-                                Icons.delete_outline,
-                                color: Colors.redAccent,
-                                size: 18,
-                              ),
-                              tooltip: "Delete channel",
-                              onPressed: () => _showDeleteVoiceChannelDialog(
-                                context,
-                                state,
-                                channel,
-                              ),
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(),
-                            ),
-                          IconButton(
-                            icon: const Icon(
-                              Icons.call_end,
-                              color: Colors.redAccent,
-                              size: 18,
-                            ),
-                            tooltip: "Leave voice channel",
-                            onPressed: () => state.leaveVoiceChannel(),
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                          ),
-                        ],
+                        children: activeActions,
                       ),
                     );
-                  } else if (canDeleteChannel) {
-                    trailing = IconButton(
-                      icon: const Icon(
-                        Icons.delete_outline,
-                        color: Colors.redAccent,
-                        size: 18,
+                  } else if (canDeleteChannel || canOpenSettings) {
+                    final inactiveActions = <Widget>[
+                      if (canOpenSettings)
+                        IconButton(
+                          icon: const Icon(
+                            Icons.tune,
+                            color: Colors.lightBlueAccent,
+                            size: 18,
+                          ),
+                          tooltip: "Channel settings",
+                          onPressed: () => _showVoiceChannelSettingsDialog(
+                            context,
+                            state,
+                            channel,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                      if (canDeleteChannel)
+                        IconButton(
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Colors.redAccent,
+                            size: 18,
+                          ),
+                          tooltip: "Delete channel",
+                          onPressed: () => _showDeleteVoiceChannelDialog(
+                            context,
+                            state,
+                            channel,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                    ];
+                    trailing = SizedBox(
+                      width: 28.0 * inactiveActions.length,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: inactiveActions,
                       ),
-                      tooltip: "Delete channel",
-                      onPressed: () =>
-                          _showDeleteVoiceChannelDialog(context, state, channel),
                     );
                   }
 
@@ -724,6 +844,189 @@ class _SidebarState extends State<Sidebar> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ChannelSettingsDialog extends StatefulWidget {
+  const _ChannelSettingsDialog({
+    required this.channelId,
+    required this.channelName,
+    required this.isVoiceChannel,
+  });
+
+  final int channelId;
+  final String channelName;
+  final bool isVoiceChannel;
+
+  @override
+  State<_ChannelSettingsDialog> createState() => _ChannelSettingsDialogState();
+}
+
+class _ChannelSettingsDialogState extends State<_ChannelSettingsDialog> {
+  ChannelPermissions? _permissions;
+  bool _isLoading = true;
+  String? _error;
+  final Set<int> _updatingUserIds = <int>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPermissions();
+  }
+
+  Future<void> _loadPermissions() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
+    final state = context.read<AppState>();
+    final permissions = widget.isVoiceChannel
+        ? await state.fetchVoiceChannelPermissionsAsAdmin(widget.channelId)
+        : await state.fetchTextChannelPermissionsAsAdmin(widget.channelId);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _permissions = permissions;
+      _isLoading = false;
+      if (permissions == null) {
+        _error = "Unable to load channel settings.";
+      }
+    });
+  }
+
+  Future<void> _updateUserVisibility(
+    ChannelUserVisibility user,
+    bool canView,
+  ) async {
+    if (_updatingUserIds.contains(user.userId)) {
+      return;
+    }
+
+    setState(() {
+      _updatingUserIds.add(user.userId);
+      _error = null;
+    });
+
+    final state = context.read<AppState>();
+    final permissions = widget.isVoiceChannel
+        ? await state.updateVoiceChannelUserVisibilityAsAdmin(
+            channelId: widget.channelId,
+            targetUserId: user.userId,
+            canView: canView,
+          )
+        : await state.updateTextChannelUserVisibilityAsAdmin(
+            channelId: widget.channelId,
+            targetUserId: user.userId,
+            canView: canView,
+          );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _updatingUserIds.remove(user.userId);
+      if (permissions != null) {
+        _permissions = permissions;
+      } else {
+        _error = "Unable to update channel settings.";
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final users = _permissions?.users ?? const <ChannelUserVisibility>[];
+    final channelPrefix = widget.isVoiceChannel ? "" : "#";
+
+    return AlertDialog(
+      backgroundColor: const Color(0xFF2F3136),
+      title: Text("Settings: $channelPrefix${widget.channelName}"),
+      content: SizedBox(
+        width: 420,
+        height: 420,
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _permissions == null
+                ? Center(
+                    child: Text(_error ?? "Unable to load channel settings."),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Control which users can view this channel. Admins are always allowed.",
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                      if (_error != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _error!,
+                          style: const TextStyle(color: Colors.redAccent),
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: users.isEmpty
+                            ? const Center(child: Text("No users found."))
+                            : ListView.separated(
+                                itemCount: users.length,
+                                separatorBuilder: (_, __) =>
+                                    const Divider(height: 1),
+                                itemBuilder: (context, index) {
+                                  final user = users[index];
+                                  final role = user.role.toLowerCase();
+                                  final isAdminUser = role == "admin";
+                                  final isUpdating =
+                                      _updatingUserIds.contains(user.userId);
+                                  return SwitchListTile(
+                                    dense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                    title: Text(
+                                      user.username,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    subtitle: Text(
+                                      isAdminUser
+                                          ? "${user.role} (always visible)"
+                                          : user.role,
+                                    ),
+                                    value: isAdminUser ? true : user.canView,
+                                    onChanged: (isAdminUser || isUpdating)
+                                        ? null
+                                        : (value) =>
+                                            _updateUserVisibility(user, value),
+                                    secondary: isUpdating
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : null,
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isLoading ? null : _loadPermissions,
+          child: const Text("Refresh"),
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text("Close"),
+        ),
+      ],
     );
   }
 }
