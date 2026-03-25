@@ -472,13 +472,15 @@ async def _handle_music_play_command(
         await _send_music_bot_notice(channel_id, "I couldn't load that link.")
         return
 
-    # Construct proxy URL if base_url is provided
-    # Proxying is generally safer for YouTube/SoundCloud
+    # Construct proxy URL if base_url is provided.
+    # Do not proxy manifest URLs (.m3u8/.mpd); players need direct manifest-relative fetches.
     final_stream_url = stream_url
-    if base_url:
+    if base_url and not _looks_like_manifest_url(stream_url):
         base = base_url.rstrip("/")
         encoded_stream_url = urllib.parse.quote(stream_url, safe="")
         final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
+    elif base_url and _looks_like_manifest_url(stream_url):
+        logger.info("Skipping audio proxy for manifest stream url=%s", stream_url)
 
     await voice_manager.broadcast(
         voice_channel_id,
@@ -513,6 +515,11 @@ def _build_http_base_url_from_websocket(websocket: WebSocket) -> str | None:
     if port == default_port:
         return f"{scheme}://{host}"
     return f"{scheme}://{host}:{port}"
+
+
+def _looks_like_manifest_url(url: str) -> bool:
+    normalized = (url or "").strip().lower()
+    return ".m3u8" in normalized or ".mpd" in normalized
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -2111,56 +2118,60 @@ async def audio_proxy(request: Request, url: str):
     if request_range:
         forwarded_headers["Range"] = request_range
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        try:
-            probe_headers = {
-                key: value
-                for key, value in forwarded_headers.items()
-                if key.lower() != "range"
-            }
-            content_type = "audio/mpeg"
-            response_headers: Dict[str, str] = {"Accept-Ranges": "bytes"}
+    client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+    upstream_response: httpx.Response | None = None
+    try:
+        request_obj = client.build_request("GET", target_url, headers=forwarded_headers)
+        upstream_response = await client.send(request_obj, stream=True)
+        status_code = upstream_response.status_code
 
-            # Probe metadata without downloading audio body.
-            try:
-                probe = await client.head(
-                    target_url,
-                    headers=probe_headers,
-                    timeout=10.0,
-                )
-                if 200 <= probe.status_code < 400:
-                    content_type = probe.headers.get("Content-Type", content_type)
-                    response_headers["Accept-Ranges"] = probe.headers.get("Accept-Ranges", "bytes")
-                    for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
-                        header_value = probe.headers.get(header_name)
-                        if header_value:
-                            response_headers[header_name] = header_value
-                else:
-                    logger.warning(
-                        "Audio proxy HEAD probe failed status=%s url=%s",
-                        probe.status_code,
-                        target_url,
-                    )
-            except Exception as probe_exc:
-                logger.warning("Audio proxy HEAD probe failed url=%s error=%s", target_url, probe_exc)
-
-            async def stream_audio():
-                async with client.stream(
-                    "GET",
-                    target_url,
-                    headers=forwarded_headers,
-                ) as resp:
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        yield chunk
-
-            return StreamingResponse(
-                stream_audio(),
-                media_type=content_type,
-                headers=response_headers,
+        if status_code >= 400:
+            body_preview = await upstream_response.aread()
+            await upstream_response.aclose()
+            upstream_response = None
+            await client.aclose()
+            detail_suffix = ""
+            if body_preview:
+                snippet = body_preview[:200].decode("utf-8", errors="ignore").strip()
+                if snippet:
+                    detail_suffix = f": {snippet}"
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"Upstream audio request failed with {status_code}{detail_suffix}",
             )
-        except Exception as e:
-            logger.error(f"Proxy error: {e}")
-            raise HTTPException(status_code=500, detail="Could not proxy audio")
+
+        content_type = upstream_response.headers.get("Content-Type", "audio/mpeg")
+        response_headers: Dict[str, str] = {
+            "Accept-Ranges": upstream_response.headers.get("Accept-Ranges", "bytes"),
+        }
+        for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
+            header_value = upstream_response.headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
+
+        async def stream_audio():
+            assert upstream_response is not None
+            try:
+                async for chunk in upstream_response.aiter_bytes(chunk_size=65536):
+                    yield chunk
+            finally:
+                await upstream_response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_audio(),
+            media_type=content_type,
+            headers=response_headers,
+            status_code=status_code,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Proxy error url=%s error=%s", target_url, e)
+        if upstream_response is not None:
+            await upstream_response.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=500, detail="Could not proxy audio")
 
 
 # --- WEBSOCKET ENDPOINTS ---
