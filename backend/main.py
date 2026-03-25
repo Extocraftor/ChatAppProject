@@ -1083,6 +1083,32 @@ def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
     return strategies
 
 
+def _decode_ytdlp_cookies_b64(cookies_b64: str) -> str:
+    # Accept values copied with line wraps and values missing trailing "=" padding.
+    normalized = re.sub(r"\s+", "", cookies_b64)
+
+    lowered = normalized.lower()
+    if lowered.startswith("data:") and ";base64," in lowered:
+        _, _, normalized = normalized.partition(",")
+
+    if not normalized:
+        raise ValueError("Empty base64 value")
+
+    padded = normalized + ("=" * (-len(normalized) % 4))
+    decode_errors: list[str] = []
+
+    for decode_name, decoder in (
+        ("base64", base64.b64decode),
+        ("urlsafe-base64", base64.urlsafe_b64decode),
+    ):
+        try:
+            return decoder(padded).decode("utf-8")
+        except Exception as exc:
+            decode_errors.append(f"{decode_name}: {exc}")
+
+    raise ValueError("; ".join(decode_errors))
+
+
 def _resolve_ytdlp_cookie_file() -> str | None:
     global _YTDLP_COOKIEFILE_CACHE
 
@@ -1099,9 +1125,9 @@ def _resolve_ytdlp_cookie_file() -> str | None:
 
     if cookies_b64:
         try:
-            resolved_content = base64.b64decode(cookies_b64).decode("utf-8")
-        except Exception:
-            logger.exception("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value")
+            resolved_content = _decode_ytdlp_cookies_b64(cookies_b64)
+        except Exception as exc:
+            logger.warning("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value: %s", exc)
             return None
     elif cookies_text.strip():
         resolved_content = cookies_text.replace("\\n", "\n")
