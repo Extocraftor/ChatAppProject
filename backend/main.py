@@ -11,7 +11,7 @@ import urllib.parse
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
@@ -69,6 +69,12 @@ YTDLP_FORMAT_UNAVAILABLE_PHRASES = (
     "requested format is not available",
 )
 MANIFEST_FORMAT_HINTS = ("m3u8", "hls", "dash", "f4m", "ism")
+MANIFEST_CONTENT_TYPE_HINTS = (
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+    "application/dash+xml",
+)
 PREFERRED_AUDIO_EXT_ORDER = ("mp3", "m4a", "aac", "opus", "ogg", "webm", "wav")
 PREFERRED_AUDIO_EXT_RANK = {
     ext: rank for rank, ext in enumerate(PREFERRED_AUDIO_EXT_ORDER)
@@ -473,14 +479,9 @@ async def _handle_music_play_command(
         return
 
     # Construct proxy URL if base_url is provided.
-    # Do not proxy manifest URLs (.m3u8/.mpd); players need direct manifest-relative fetches.
     final_stream_url = stream_url
-    if base_url and not _looks_like_manifest_url(stream_url):
-        base = base_url.rstrip("/")
-        encoded_stream_url = urllib.parse.quote(stream_url, safe="")
-        final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
-    elif base_url and _looks_like_manifest_url(stream_url):
-        logger.info("Skipping audio proxy for manifest stream url=%s", stream_url)
+    if base_url:
+        final_stream_url = _build_audio_proxy_url(base_url, stream_url)
 
     await voice_manager.broadcast(
         voice_channel_id,
@@ -489,6 +490,7 @@ async def _handle_music_play_command(
             "title": title,
             "source_url": raw_url,
             "stream_url": final_stream_url,
+            "stream_is_manifest": _looks_like_manifest_url(stream_url),
             "requested_by_user_id": user_id,
             "requested_by_username": username,
         },
@@ -520,6 +522,64 @@ def _build_http_base_url_from_websocket(websocket: WebSocket) -> str | None:
 def _looks_like_manifest_url(url: str) -> bool:
     normalized = (url or "").strip().lower()
     return ".m3u8" in normalized or ".mpd" in normalized
+
+
+def _looks_like_manifest_content_type(content_type: str | None) -> bool:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized:
+        return False
+    if normalized in MANIFEST_CONTENT_TYPE_HINTS:
+        return True
+    return "mpegurl" in normalized or "dash+xml" in normalized
+
+
+def _build_audio_proxy_url(base_url: str, target_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return target_url
+
+    parsed_target = urllib.parse.urlparse(target_url)
+    proxy_base = urllib.parse.urlparse(base)
+    if (
+        parsed_target.scheme in {"http", "https"}
+        and parsed_target.netloc == proxy_base.netloc
+        and parsed_target.path.rstrip("/") == "/audio-proxy"
+        and "url=" in parsed_target.query
+    ):
+        return target_url
+
+    encoded_target = urllib.parse.quote(target_url, safe="")
+    return f"{base}/audio-proxy?url={encoded_target}"
+
+
+def _rewrite_manifest_for_proxy(manifest_text: str, manifest_url: str, proxy_base_url: str) -> str:
+    def replace_uri_attribute(match: re.Match[str]) -> str:
+        quote_char = match.group(1)
+        uri_value = match.group(2).strip()
+        absolute_uri = urllib.parse.urljoin(manifest_url, uri_value)
+        proxied_uri = _build_audio_proxy_url(proxy_base_url, absolute_uri)
+        return f"URI={quote_char}{proxied_uri}{quote_char}"
+
+    rewritten_lines: List[str] = []
+    for raw_line in manifest_text.splitlines():
+        stripped_line = raw_line.strip()
+        if not stripped_line:
+            rewritten_lines.append(raw_line)
+            continue
+
+        if stripped_line.startswith("#"):
+            rewritten_lines.append(
+                re.sub(r"URI=(['\"])(.+?)\1", replace_uri_attribute, raw_line)
+            )
+            continue
+
+        absolute_uri = urllib.parse.urljoin(manifest_url, stripped_line)
+        rewritten_lines.append(_build_audio_proxy_url(proxy_base_url, absolute_uri))
+
+    rewritten_manifest = "\n".join(rewritten_lines)
+    if manifest_text.endswith("\n"):
+        rewritten_manifest += "\n"
+    return rewritten_manifest
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -1026,11 +1086,10 @@ _backfill_default_channel_permissions()
 
 
 def _build_ytdlp_options(
-    format_selector: str = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
+    format_selector: str | None = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
     use_tuned_extractor: bool = False,
 ) -> Dict[str, Any]:
     options: Dict[str, Any] = {
-        "format": format_selector,
         "noplaylist": True,
         "skip_download": True,
         "quiet": True,
@@ -1040,6 +1099,8 @@ def _build_ytdlp_options(
         "socket_timeout": 30,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
+    if format_selector:
+        options["format"] = format_selector
 
     if use_tuned_extractor:
         player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
@@ -1067,6 +1128,7 @@ def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
         ("audio-http-direct", _build_ytdlp_options(use_tuned_extractor=False)),
         ("audio-default", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=False)),
         ("best-default", _build_ytdlp_options("best", use_tuned_extractor=False)),
+        ("auto-default", _build_ytdlp_options(None, use_tuned_extractor=False)),
     ]
 
     tune_enabled_value = os.getenv("MUSIC_BOT_YTDLP_ENABLE_TUNED_EXTRACTOR", "1").strip().lower()
@@ -1077,6 +1139,7 @@ def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
                 ("audio-http-direct-tuned", _build_ytdlp_options(use_tuned_extractor=True)),
                 ("audio-tuned", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=True)),
                 ("best-tuned", _build_ytdlp_options("best", use_tuned_extractor=True)),
+                ("auto-tuned", _build_ytdlp_options(None, use_tuned_extractor=True)),
             ]
         )
 
@@ -2134,14 +2197,27 @@ async def audio_proxy(request: Request, url: str):
     if parsed_target_url.scheme not in {"http", "https"} or not parsed_target_url.netloc:
         raise HTTPException(status_code=400, detail="Invalid audio target URL")
 
+    target_host = (parsed_target_url.hostname or "").lower()
+    referer = "https://www.youtube.com/"
+    origin = "https://www.youtube.com"
+    if "soundcloud" in target_host:
+        referer = "https://soundcloud.com/"
+        origin = "https://soundcloud.com"
+
+    is_manifest_target = _looks_like_manifest_url(target_url)
     forwarded_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "audio/*,*/*;q=0.8",
-        "Referer": "https://www.youtube.com/",
+        "Accept": (
+            "application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8"
+            if is_manifest_target
+            else "audio/*,*/*;q=0.8"
+        ),
+        "Referer": referer,
+        "Origin": origin,
     }
 
     request_range = request.headers.get("range")
-    if request_range:
+    if request_range and not is_manifest_target:
         forwarded_headers["Range"] = request_range
 
     client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
@@ -2167,6 +2243,8 @@ async def audio_proxy(request: Request, url: str):
             )
 
         content_type = upstream_response.headers.get("Content-Type", "audio/mpeg")
+        looks_like_manifest = is_manifest_target or _looks_like_manifest_content_type(content_type)
+
         response_headers: Dict[str, str] = {
             "Accept-Ranges": upstream_response.headers.get("Accept-Ranges", "bytes"),
         }
@@ -2174,6 +2252,37 @@ async def audio_proxy(request: Request, url: str):
             header_value = upstream_response.headers.get(header_name)
             if header_value:
                 response_headers[header_name] = header_value
+
+        if looks_like_manifest:
+            manifest_bytes = await upstream_response.aread()
+            await upstream_response.aclose()
+            upstream_response = None
+            await client.aclose()
+
+            manifest_text = manifest_bytes.decode("utf-8", errors="replace")
+            if manifest_text.lstrip().startswith("#EXTM3U"):
+                proxy_base_url = str(request.base_url).rstrip("/")
+                rewritten_manifest = _rewrite_manifest_for_proxy(
+                    manifest_text,
+                    target_url,
+                    proxy_base_url,
+                )
+                manifest_headers = dict(response_headers)
+                manifest_headers.pop("Content-Length", None)
+                manifest_headers.pop("Content-Range", None)
+                return Response(
+                    content=rewritten_manifest,
+                    media_type="application/vnd.apple.mpegurl",
+                    headers=manifest_headers,
+                    status_code=status_code,
+                )
+
+            return Response(
+                content=manifest_bytes,
+                media_type=content_type,
+                headers=response_headers,
+                status_code=status_code,
+            )
 
         async def stream_audio():
             assert upstream_response is not None

@@ -1567,14 +1567,43 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    final streamIsManifest =
+        payload['stream_is_manifest'] == true ||
+        _looksLikeManifestStreamUrl(streamUrl);
+    final mimeType = _resolveMusicStreamMimeType(streamUrl, streamIsManifest);
+
     try {
       await _musicPlayer.stop();
-      await _musicPlayer.setSource(UrlSource(streamUrl));
+      await _musicPlayer.setSource(UrlSource(streamUrl, mimeType: mimeType));
       await _musicPlayer.resume();
     } catch (error) {
-      voiceError = "Unable to start music playback: $error";
+      if (streamIsManifest &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.windows) {
+        voiceError =
+            "Unable to play this stream on Windows. Try another track or source.";
+      } else {
+        voiceError = "Unable to start music playback: $error";
+      }
       notifyListeners();
     }
+  }
+
+  bool _looksLikeManifestStreamUrl(String url) {
+    final normalized = url.trim().toLowerCase();
+    return normalized.contains('.m3u8') || normalized.contains('.mpd');
+  }
+
+  String? _resolveMusicStreamMimeType(String streamUrl, bool isManifest) {
+    if (!isManifest) {
+      return null;
+    }
+
+    final normalized = streamUrl.toLowerCase();
+    if (normalized.contains('.mpd')) {
+      return 'application/dash+xml';
+    }
+    return 'application/vnd.apple.mpegurl';
   }
 
   Future<RTCPeerConnection> _ensurePeerConnection(int remoteUserId) async {
