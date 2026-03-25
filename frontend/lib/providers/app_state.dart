@@ -2808,6 +2808,7 @@ class AppState extends ChangeNotifier {
         timestamp: DateTime.now().toUtc().toIso8601String(),
       ),
     );
+    notifyListeners();
   }
 
   void _applyPinStateFromMessage(Message source) {

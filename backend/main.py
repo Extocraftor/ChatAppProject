@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 import urllib.parse
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
@@ -20,6 +20,12 @@ try:
     import yt_dlp
 except Exception:  # pragma: no cover - optional dependency at runtime
     yt_dlp = None
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyClientCredentials
+except Exception:  # pragma: no cover - optional dependency at runtime
+    spotipy = None
+    SpotifyClientCredentials = None
 from database import SessionLocal, engine, get_db
 import models, schemas
 from passlib.context import CryptContext
@@ -213,7 +219,7 @@ class ConnectionManager:
         if not connections:
             self.active_connections.pop(channel_id, None)
 
-    async def broadcast(self, message: str, channel_id: int):
+    async def broadcast(self, channel_id: int, message: str):
         connections = self.active_connections.get(channel_id, [])
         for connection in list(connections):
             try:
@@ -345,14 +351,61 @@ voice_manager = VoiceConnectionManager()
 
 async def _send_music_bot_notice(channel_id: int, content: str) -> None:
     await manager.broadcast(
+        channel_id,
         json.dumps(
             {
                 "type": "music_bot_notice",
                 "content": content,
             }
         ),
-        channel_id,
     )
+
+
+def _resolve_spotify_to_search_query(spotify_url: str) -> str:
+    if spotipy is None or SpotifyClientCredentials is None:
+        raise MusicExtractionError("Spotify support is unavailable on the server.")
+
+    client_id = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise MusicExtractionError(
+            "Spotify links require SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET env vars."
+        )
+
+    match = SPOTIFY_URL_PATTERN.match(spotify_url)
+    if not match:
+        raise MusicExtractionError("Unsupported Spotify URL format.")
+    track_id = match.group("id")
+    if not track_id:
+        raise MusicExtractionError("Could not parse Spotify track ID.")
+
+    try:
+        client = spotipy.Spotify(
+            auth_manager=SpotifyClientCredentials(
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+        )
+        track = client.track(track_id)
+        title = str(track.get("name") or "").strip()
+        artists = [
+            str(artist.get("name") or "").strip()
+            for artist in (track.get("artists") or [])
+            if isinstance(artist, dict)
+        ]
+        artists = [artist for artist in artists if artist]
+    except MusicExtractionError:
+        raise
+    except Exception as exc:
+        logger.warning("spotify track lookup failed url=%s error=%s", spotify_url, exc)
+        raise MusicExtractionError("Could not resolve this Spotify track.")
+
+    if not title:
+        raise MusicExtractionError("Spotify track metadata is incomplete.")
+
+    if not artists:
+        return f"ytsearch1:{title}"
+    return f"ytsearch1:{' '.join(artists)} - {title}"
 
 
 async def _handle_music_play_command(
@@ -392,7 +445,11 @@ async def _handle_music_play_command(
         )
 
     if is_spotify:
-        extraction_url = f"ytsearch1:{raw_url}"
+        try:
+            extraction_url = _resolve_spotify_to_search_query(raw_url)
+        except MusicExtractionError as exc:
+            await _send_music_bot_notice(channel_id, str(exc))
+            return
     elif not is_youtube and not is_soundcloud:
         extraction_url = f"ytsearch1:{raw_url}"
 
@@ -439,6 +496,23 @@ async def _handle_music_play_command(
         channel_id,
         f"Now playing: {title}",
     )
+
+
+def _build_http_base_url_from_websocket(websocket: WebSocket) -> str | None:
+    ws_url = websocket.url
+    host = ws_url.hostname
+    if not host:
+        return None
+
+    scheme = "https" if ws_url.scheme in {"wss", "https"} else "http"
+    port = ws_url.port
+    if port is None:
+        return f"{scheme}://{host}"
+
+    default_port = 443 if scheme == "https" else 80
+    if port == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -1832,6 +1906,7 @@ async def pin_message(
     db.refresh(target_message)
 
     await manager.broadcast(
+        channel_id,
         json.dumps(
             {
                 "type": "pin_message",
@@ -1842,7 +1917,6 @@ async def pin_message(
                 "pinned_by_username": target_message.pinned_by_username,
             }
         ),
-        channel_id,
     )
 
     return target_message
@@ -1880,13 +1954,13 @@ async def unpin_message(
         db.commit()
 
     await manager.broadcast(
+        channel_id,
         json.dumps(
             {
                 "type": "unpin_message",
                 "id": target_message.id,
             }
         ),
-        channel_id,
     )
 
     return {"detail": "Message unpinned"}
@@ -2020,17 +2094,30 @@ def list_voice_channel_participants(voice_channel_id: int):
 
 
 @app.get("/audio-proxy")
-async def audio_proxy(url: str):
+async def audio_proxy(request: Request, url: str):
     # Decode the URL if it's double-encoded
-    target_url = urllib.parse.unquote(url)
+    target_url = urllib.parse.unquote(url).strip()
+    parsed_target_url = urllib.parse.urlparse(target_url)
+    if parsed_target_url.scheme not in {"http", "https"} or not parsed_target_url.netloc:
+        raise HTTPException(status_code=400, detail="Invalid audio target URL")
+
     forwarded_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "audio/*,*/*;q=0.8",
+        "Referer": "https://www.youtube.com/",
     }
 
-    async with httpx.AsyncClient() as client:
+    request_range = request.headers.get("range")
+    if request_range:
+        forwarded_headers["Range"] = request_range
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
         try:
-            probe_headers = dict(forwarded_headers)
+            probe_headers = {
+                key: value
+                for key, value in forwarded_headers.items()
+                if key.lower() != "range"
+            }
             content_type = "audio/mpeg"
             response_headers: Dict[str, str] = {"Accept-Ranges": "bytes"}
 
@@ -2039,7 +2126,6 @@ async def audio_proxy(url: str):
                 probe = await client.head(
                     target_url,
                     headers=probe_headers,
-                    follow_redirects=True,
                     timeout=10.0,
                 )
                 if 200 <= probe.status_code < 400:
@@ -2063,10 +2149,8 @@ async def audio_proxy(url: str):
                     "GET",
                     target_url,
                     headers=forwarded_headers,
-                    follow_redirects=True,
-                    timeout=30.0,
                 ) as resp:
-                    async for chunk in resp.aiter_bytes():
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
                         yield chunk
 
             return StreamingResponse(
@@ -2199,9 +2283,9 @@ async def websocket_endpoint(
                 else:
                     continue
 
-                await manager.broadcast(broadcast_msg, channel_id)
+                await manager.broadcast(channel_id, broadcast_msg)
                 if msg_type == "new_message":
-                    base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+                    base_url = _build_http_base_url_from_websocket(websocket)
                     await _handle_music_play_command(
                         channel_id=channel_id,
                         user_id=user_id,
@@ -2229,8 +2313,8 @@ async def websocket_endpoint(
                         "pinned_by_username": db_message.pinned_by_username,
                     }
                 )
-                await manager.broadcast(broadcast_msg, channel_id)
-                base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+                await manager.broadcast(channel_id, broadcast_msg)
+                base_url = _build_http_base_url_from_websocket(websocket)
                 await _handle_music_play_command(
                     channel_id=channel_id,
                     user_id=user_id,

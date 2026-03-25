@@ -1,0 +1,1118 @@
+Music Bot Implementation Attempt - Combined Critical Logic
+Generated on: 2026-03-25
+
+Why this is excerpted:
+- The full candidate files are very large (~5.3k lines combined).
+- This document includes only the sections that implement music-bot behavior.
+
+Primary files found:
+1) backend/main.py
+2) frontend/lib/providers/app_state.dart
+3) backend/requirements.txt (dependency context)
+
+====================================================================
+SECTION A - DEPENDENCY CONTEXT
+====================================================================
+FILE: backend/requirements.txt
+     1	fastapi
+     2	uvicorn
+     3	websockets
+     4	sqlalchemy
+     5	psycopg2-binary
+     6	pydantic
+     7	python-dotenv
+     8	passlib[bcrypt]
+     9	bcrypt==4.0.1
+    10	gunicorn
+    11	yt-dlp
+    12	httpx
+    13	spotipy
+
+====================================================================
+SECTION B - BACKEND MUSIC BOT LOGIC
+====================================================================
+FILE: backend/main.py
+
+[B1] Music-command patterns and extraction-related constants
+--------------------------------------------------------------------
+     1	import asyncio
+     2	import base64
+     3	import json
+     4	import logging
+     5	import os
+     6	import re
+     7	import tempfile
+     8	from datetime import datetime
+     9	from typing import Any, Dict, List
+    10	import urllib.parse
+    11	
+    12	import httpx
+    13	from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+    14	from fastapi.responses import StreamingResponse
+    15	from fastapi.middleware.cors import CORSMiddleware
+    16	from sqlalchemy import inspect, text
+    17	from sqlalchemy.orm import Session, joinedload
+    18	
+    19	try:
+    20	    import yt_dlp
+    21	except Exception:  # pragma: no cover - optional dependency at runtime
+    22	    yt_dlp = None
+    23	from database import SessionLocal, engine, get_db
+    24	import models, schemas
+    25	from passlib.context import CryptContext
+    26	
+    27	# Password hashing
+    28	pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    29	
+    30	
+    31	def get_password_hash(password: str) -> str:
+    32	    # Bcrypt has a 72-byte limit. We truncate to 64 for extra safety.
+    33	    return pwd_context.hash(password[:64])
+    34	
+    35	
+    36	def verify_password(plain_password: str, hashed_password: str) -> bool:
+    37	    return pwd_context.verify(plain_password[:64], hashed_password)
+    38	
+    39	
+    40	ROLE_MEMBER = "member"
+    41	ROLE_MODERATOR = "moderator"
+    42	ROLE_ADMIN = "admin"
+    43	PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
+    44	YOUTUBE_URL_PATTERN = re.compile(
+    45	    r"^(https?://)?((www|m|music)\.)?(youtube\.com|youtu\.be)/.+$",
+    46	    re.IGNORECASE,
+    47	)
+    48	SPOTIFY_URL_PATTERN = re.compile(
+    49	    r"^(https?://)?(open\.spotify\.com/track/)(?P<id>[a-zA-Z0-9]+).*$",
+    50	    re.IGNORECASE,
+    51	)
+    52	SOUNDCLOUD_URL_PATTERN = re.compile(
+    53	    r"^(https?://)?((www|m|on)\.)?(soundcloud\.com|snd\.sc)/.+$",
+    54	    re.IGNORECASE,
+    55	)
+    56	AUTO_COOKIE_BROWSERS = ("edge", "chrome", "brave", "firefox")
+    57	YTDLP_BOT_CHECK_PHRASES = (
+    58	    "sign in to confirm you're not a bot",
+    59	    "sign in to confirm you are not a bot",
+    60	    "use --cookies-from-browser or --cookies for the authentication",
+    61	)
+    62	YTDLP_FORMAT_UNAVAILABLE_PHRASES = (
+    63	    "requested format is not available",
+    64	)
+    65	MANIFEST_FORMAT_HINTS = ("m3u8", "hls", "dash", "f4m", "ism")
+    66	PREFERRED_AUDIO_EXT_ORDER = ("mp3", "m4a", "aac", "opus", "ogg", "webm", "wav")
+    67	PREFERRED_AUDIO_EXT_RANK = {
+    68	    ext: rank for rank, ext in enumerate(PREFERRED_AUDIO_EXT_ORDER)
+    69	}
+    70	
+    71	
+    72	class MusicExtractionError(RuntimeError):
+    73	    pass
+    74	
+    75	
+    76	_YTDLP_COOKIEFILE_CACHE: str | None = None
+
+[B2] Voice connection manager + music command handler
+--------------------------------------------------------------------
+   233	# Connection manager for voice channels/WebRTC signaling
+   234	class VoiceConnectionManager:
+   235	    def __init__(self):
+   236	        # channel_id -> user_id -> websocket
+   237	        self.active_connections: Dict[int, Dict[int, WebSocket]] = {}
+   238	        # channel_id -> user_id -> username
+   239	        self.usernames: Dict[int, Dict[int, str]] = {}
+   240	        # channel_id -> user_id -> muted state
+   241	        self.mute_states: Dict[int, Dict[int, bool]] = {}
+   242	
+   243	    async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
+   244	        await websocket.accept()
+   245	        if channel_id not in self.active_connections:
+   246	            self.active_connections[channel_id] = {}
+   247	        if channel_id not in self.usernames:
+   248	            self.usernames[channel_id] = {}
+   249	        if channel_id not in self.mute_states:
+   250	            self.mute_states[channel_id] = {}
+   251	
+   252	        # If the same user reconnects quickly, close the stale socket first.
+   253	        existing_socket = self.active_connections[channel_id].get(user_id)
+   254	        if existing_socket is not None and existing_socket is not websocket:
+   255	            try:
+   256	                await existing_socket.close(code=1000)
+   257	            except Exception:
+   258	                pass
+   259	
+   260	        self.active_connections[channel_id][user_id] = websocket
+   261	        self.usernames[channel_id][user_id] = username
+   262	        self.mute_states[channel_id].setdefault(user_id, False)
+   263	
+   264	    def disconnect(self, channel_id: int, user_id: int, websocket: WebSocket | None = None) -> bool:
+   265	        removed = False
+   266	        if channel_id in self.active_connections:
+   267	            channel_connections = self.active_connections[channel_id]
+   268	            current_socket = channel_connections.get(user_id)
+   269	            # Ignore stale-disconnect callbacks from sockets that were replaced.
+   270	            if websocket is not None and current_socket is not websocket:
+   271	                return False
+   272	
+   273	            if user_id in channel_connections:
+   274	                channel_connections.pop(user_id, None)
+   275	                removed = True
+   276	            if not channel_connections:
+   277	                self.active_connections.pop(channel_id, None)
+   278	
+   279	        if channel_id in self.usernames:
+   280	            self.usernames[channel_id].pop(user_id, None)
+   281	            if not self.usernames[channel_id]:
+   282	                self.usernames.pop(channel_id, None)
+   283	
+   284	        if channel_id in self.mute_states:
+   285	            self.mute_states[channel_id].pop(user_id, None)
+   286	            if not self.mute_states[channel_id]:
+   287	                self.mute_states.pop(channel_id, None)
+   288	        return removed
+   289	
+   290	    def participants(self, channel_id: int) -> List[Dict[str, Any]]:
+   291	        usernames = self.usernames.get(channel_id, {})
+   292	        mute_states = self.mute_states.get(channel_id, {})
+   293	        return [
+   294	            {
+   295	                "user_id": user_id,
+   296	                "username": usernames.get(user_id, f"User #{user_id}"),
+   297	                "is_muted": mute_states.get(user_id, False),
+   298	            }
+   299	            for user_id in usernames.keys()
+   300	        ]
+   301	
+   302	    def update_mute_state(self, channel_id: int, user_id: int, is_muted: bool):
+   303	        if channel_id not in self.mute_states:
+   304	            self.mute_states[channel_id] = {}
+   305	        self.mute_states[channel_id][user_id] = is_muted
+   306	
+   307	    def find_channel_for_user(self, user_id: int) -> int | None:
+   308	        for channel_id, channel_connections in self.active_connections.items():
+   309	            if user_id in channel_connections:
+   310	                return channel_id
+   311	        return None
+   312	
+   313	    async def send_to_user(self, channel_id: int, user_id: int, payload: Dict[str, Any]):
+   314	        channel_connections = self.active_connections.get(channel_id, {})
+   315	        websocket = channel_connections.get(user_id)
+   316	        if websocket is None:
+   317	            return
+   318	
+   319	        try:
+   320	            await websocket.send_text(json.dumps(payload))
+   321	        except Exception:
+   322	            self.disconnect(channel_id, user_id, websocket=websocket)
+   323	
+   324	    async def broadcast(self, channel_id: int, payload: Dict[str, Any], exclude_user_id: int | None = None):
+   325	        channel_connections = self.active_connections.get(channel_id, {})
+   326	        for user_id in list(channel_connections.keys()):
+   327	            if exclude_user_id is not None and user_id == exclude_user_id:
+   328	                continue
+   329	            await self.send_to_user(channel_id, user_id, payload)
+   330	
+   331	    async def close_channel(self, channel_id: int):
+   332	        channel_connections = self.active_connections.pop(channel_id, {})
+   333	        self.usernames.pop(channel_id, None)
+   334	        self.mute_states.pop(channel_id, None)
+   335	        for websocket in list(channel_connections.values()):
+   336	            try:
+   337	                await websocket.close(code=1008)
+   338	            except Exception:
+   339	                pass
+   340	
+   341	
+   342	manager = ConnectionManager()
+   343	voice_manager = VoiceConnectionManager()
+   344	
+   345	
+   346	async def _send_music_bot_notice(channel_id: int, content: str) -> None:
+   347	    await manager.broadcast(
+   348	        json.dumps(
+   349	            {
+   350	                "type": "music_bot_notice",
+   351	                "content": content,
+   352	            }
+   353	        ),
+   354	        channel_id,
+   355	    )
+   356	
+   357	
+   358	async def _handle_music_play_command(
+   359	    channel_id: int,
+   360	    user_id: int,
+   361	    username: str,
+   362	    content: Any,
+   363	    base_url: str | None = None,
+   364	) -> None:
+   365	    if not isinstance(content, str):
+   366	        return
+   367	
+   368	    command_match = PLAY_COMMAND_PATTERN.match(content.strip())
+   369	    if not command_match:
+   370	        return
+   371	
+   372	    raw_url = (command_match.group("url") or "").strip().strip("<>")
+   373	    if not raw_url:
+   374	        await _send_music_bot_notice(channel_id, "Usage: play <url or song name>")
+   375	        return
+   376	
+   377	    # Determine extraction strategy
+   378	    extraction_url = raw_url
+   379	    is_spotify = bool(SPOTIFY_URL_PATTERN.match(raw_url))
+   380	    is_soundcloud = bool(SOUNDCLOUD_URL_PATTERN.match(raw_url))
+   381	    is_youtube = bool(YOUTUBE_URL_PATTERN.match(raw_url))
+   382	
+   383	    # Specific format for SoundCloud to avoid HLS/m3u8
+   384	    custom_format = None
+   385	    if is_soundcloud:
+   386	        custom_format = (
+   387	            "http_mp3_128_url/http_aac_160_url/"
+   388	            "bestaudio[protocol^=http][ext=mp3]/"
+   389	            "bestaudio[protocol^=http][ext=m4a]/"
+   390	            "bestaudio[protocol^=http][acodec!=none][vcodec=none]/"
+   391	            "bestaudio[protocol^=http]/bestaudio/best"
+   392	        )
+   393	
+   394	    if is_spotify:
+   395	        extraction_url = f"ytsearch1:{raw_url}"
+   396	    elif not is_youtube and not is_soundcloud:
+   397	        extraction_url = f"ytsearch1:{raw_url}"
+   398	
+   399	    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+   400	    if voice_channel_id is None:
+   401	        await _send_music_bot_notice(
+   402	            channel_id,
+   403	            "Join a voice channel first, then use play <url>.",
+   404	        )
+   405	        return
+   406	
+   407	    try:
+   408	        title, stream_url = await asyncio.to_thread(_extract_youtube_stream, extraction_url, format_override=custom_format)
+   409	    except MusicExtractionError as exc:
+   410	        logger.warning("music extraction blocked user=%s url=%s error=%s", user_id, raw_url, exc)
+   411	        await _send_music_bot_notice(channel_id, str(exc))
+   412	        return
+   413	    except Exception:
+   414	        logger.exception("music command failed user=%s url=%s", user_id, raw_url)
+   415	        await _send_music_bot_notice(channel_id, "I couldn't load that link.")
+   416	        return
+   417	
+   418	    # Construct proxy URL if base_url is provided
+   419	    # Proxying is generally safer for YouTube/SoundCloud
+   420	    final_stream_url = stream_url
+   421	    if base_url:
+   422	        base = base_url.rstrip("/")
+   423	        encoded_stream_url = urllib.parse.quote(stream_url, safe="")
+   424	        final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
+   425	
+   426	    await voice_manager.broadcast(
+   427	        voice_channel_id,
+   428	        {
+   429	            "type": "music_play",
+   430	            "title": title,
+   431	            "source_url": raw_url,
+   432	            "stream_url": final_stream_url,
+   433	            "requested_by_user_id": user_id,
+   434	            "requested_by_username": username,
+   435	        },
+   436	    )
+   437	
+   438	    await _send_music_bot_notice(
+   439	        channel_id,
+   440	        f"Now playing: {title}",
+   441	    )
+
+[B3] yt-dlp strategy, stream URL selection, and error handling
+--------------------------------------------------------------------
+   947	def _build_ytdlp_options(
+   948	    format_selector: str = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
+   949	    use_tuned_extractor: bool = False,
+   950	) -> Dict[str, Any]:
+   951	    options: Dict[str, Any] = {
+   952	        "format": format_selector,
+   953	        "noplaylist": True,
+   954	        "skip_download": True,
+   955	        "quiet": True,
+   956	        "no_warnings": True,
+   957	        "retries": 5,
+   958	        "extractor_retries": 5,
+   959	        "socket_timeout": 30,
+   960	        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+   961	    }
+   962	
+   963	    if use_tuned_extractor:
+   964	        player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
+   965	        player_clients = [
+   966	            item.strip() for item in player_clients_raw.split(",") if item.strip()
+   967	        ] or ["ios", "android", "web"]
+   968	
+   969	        player_skip_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_SKIP", "")
+   970	        player_skip = [
+   971	            item.strip() for item in player_skip_raw.split(",") if item.strip()
+   972	        ] or ["webpage", "configs"]
+   973	
+   974	        options["extractor_args"] = {
+   975	            "youtube": {
+   976	                "player_client": player_clients,
+   977	                "player_skip": player_skip,
+   978	            }
+   979	        }
+   980	
+   981	    return options
+   982	
+   983	
+   984	def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
+   985	    strategies: List[tuple[str, Dict[str, Any]]] = [
+   986	        ("audio-http-direct", _build_ytdlp_options(use_tuned_extractor=False)),
+   987	        ("audio-default", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=False)),
+   988	        ("best-default", _build_ytdlp_options("best", use_tuned_extractor=False)),
+   989	    ]
+   990	
+   991	    tune_enabled_value = os.getenv("MUSIC_BOT_YTDLP_ENABLE_TUNED_EXTRACTOR", "1").strip().lower()
+   992	    tune_enabled = tune_enabled_value not in {"0", "false", "no", "off"}
+   993	    if tune_enabled:
+   994	        strategies.extend(
+   995	            [
+   996	                ("audio-http-direct-tuned", _build_ytdlp_options(use_tuned_extractor=True)),
+   997	                ("audio-tuned", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=True)),
+   998	                ("best-tuned", _build_ytdlp_options("best", use_tuned_extractor=True)),
+   999	            ]
+  1000	        )
+  1001	
+  1002	    return strategies
+  1003	
+  1004	
+  1005	def _resolve_ytdlp_cookie_file() -> str | None:
+  1006	    global _YTDLP_COOKIEFILE_CACHE
+  1007	
+  1008	    direct_cookie_file = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FILE", "").strip()
+  1009	    if direct_cookie_file:
+  1010	        return direct_cookie_file
+  1011	
+  1012	    if _YTDLP_COOKIEFILE_CACHE and os.path.exists(_YTDLP_COOKIEFILE_CACHE):
+  1013	        return _YTDLP_COOKIEFILE_CACHE
+  1014	
+  1015	    cookies_b64 = os.getenv("MUSIC_BOT_YTDLP_COOKIES_B64", "").strip()
+  1016	    cookies_text = os.getenv("MUSIC_BOT_YTDLP_COOKIES_TEXT", "")
+  1017	    resolved_content: str | None = None
+  1018	
+  1019	    if cookies_b64:
+  1020	        try:
+  1021	            resolved_content = base64.b64decode(cookies_b64).decode("utf-8")
+  1022	        except Exception:
+  1023	            logger.exception("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value")
+  1024	            return None
+  1025	    elif cookies_text.strip():
+  1026	        resolved_content = cookies_text.replace("\\n", "\n")
+  1027	
+  1028	    if not resolved_content:
+  1029	        return None
+  1030	
+  1031	    cookie_tmp_dir = os.getenv("MUSIC_BOT_YTDLP_COOKIE_TMP_DIR", "").strip()
+  1032	    target_dir = cookie_tmp_dir or tempfile.gettempdir()
+  1033	    os.makedirs(target_dir, exist_ok=True)
+  1034	    cookie_path = os.path.join(target_dir, "music_bot_youtube_cookies.txt")
+  1035	    with open(cookie_path, "w", encoding="utf-8", newline="\n") as cookie_file:
+  1036	        cookie_file.write(resolved_content)
+  1037	
+  1038	    _YTDLP_COOKIEFILE_CACHE = cookie_path
+  1039	    return cookie_path
+  1040	
+  1041	
+  1042	def _build_ytdlp_attempts() -> List[tuple[str, Dict[str, Any], bool]]:
+  1043	    attempts: List[tuple[str, Dict[str, Any], bool]] = []
+  1044	    strategies = _build_ytdlp_strategy_options()
+  1045	
+  1046	    def append_attempts(source_name: str, auth_options: Dict[str, Any], is_authenticated: bool) -> None:
+  1047	        for strategy_name, strategy_options in strategies:
+  1048	            options = dict(strategy_options)
+  1049	            options.update(auth_options)
+  1050	            attempts.append((f"{source_name}:{strategy_name}", options, is_authenticated))
+  1051	
+  1052	    cookies_file = _resolve_ytdlp_cookie_file()
+  1053	    if cookies_file:
+  1054	        append_attempts("cookiefile", {"cookiefile": cookies_file}, True)
+  1055	
+  1056	    cookies_from_browser = os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+  1057	    seen_browser_profiles: set[tuple[str, str]] = set()
+  1058	    if cookies_from_browser:
+  1059	        for raw_entry in cookies_from_browser.split(","):
+  1060	            entry = raw_entry.strip()
+  1061	            if not entry:
+  1062	                continue
+  1063	            browser, _, profile = entry.partition(":")
+  1064	            browser = browser.strip().lower()
+  1065	            profile = profile.strip()
+  1066	            if not browser:
+  1067	                continue
+  1068	
+  1069	            dedupe_key = (browser, profile)
+  1070	            if dedupe_key in seen_browser_profiles:
+  1071	                continue
+  1072	            seen_browser_profiles.add(dedupe_key)
+  1073	
+  1074	            if profile:
+  1075	                append_attempts(
+  1076	                    f"{browser}:{profile}",
+  1077	                    {"cookiesfrombrowser": (browser, None, None, profile)},
+  1078	                    True,
+  1079	                )
+  1080	            else:
+  1081	                append_attempts(
+  1082	                    browser,
+  1083	                    {"cookiesfrombrowser": (browser,)},
+  1084	                    True,
+  1085	                )
+  1086	    else:
+  1087	        auto_browser_value = os.getenv("MUSIC_BOT_YTDLP_AUTO_COOKIES_FROM_BROWSER", "0").strip().lower()
+  1088	        auto_browser_enabled = auto_browser_value not in {"0", "false", "no", "off"}
+  1089	        if auto_browser_enabled:
+  1090	            for browser in AUTO_COOKIE_BROWSERS:
+  1091	                append_attempts(
+  1092	                    f"auto:{browser}",
+  1093	                    {"cookiesfrombrowser": (browser,)},
+  1094	                    True,
+  1095	                )
+  1096	
+  1097	    append_attempts("anonymous", {}, False)
+  1098	    return attempts
+  1099	
+  1100	
+  1101	def _looks_like_youtube_bot_check_error(error_text: str) -> bool:
+  1102	    normalized = error_text.strip().lower()
+  1103	    if any(phrase in normalized for phrase in YTDLP_BOT_CHECK_PHRASES):
+  1104	        return True
+  1105	    return "sign in to confirm" in normalized and "not a bot" in normalized
+  1106	
+  1107	
+  1108	def _looks_like_format_unavailable_error(error_text: str) -> bool:
+  1109	    normalized = error_text.strip().lower()
+  1110	    return any(phrase in normalized for phrase in YTDLP_FORMAT_UNAVAILABLE_PHRASES)
+  1111	
+  1112	
+  1113	def _normalize_format_value(value: Any) -> str:
+  1114	    return str(value or "").strip().lower()
+  1115	
+  1116	
+  1117	def _safe_float(value: Any, default: float = 0.0) -> float:
+  1118	    try:
+  1119	        return float(value)
+  1120	    except (TypeError, ValueError):
+  1121	        return default
+  1122	
+  1123	
+  1124	def _is_manifest_stream(format_data: Dict[str, Any]) -> bool:
+  1125	    protocol = _normalize_format_value(format_data.get("protocol"))
+  1126	    ext = _normalize_format_value(format_data.get("ext"))
+  1127	    container = _normalize_format_value(format_data.get("container"))
+  1128	    format_id = _normalize_format_value(format_data.get("format_id"))
+  1129	    url = str(format_data.get("url") or "").lower()
+  1130	
+  1131	    if any(hint in protocol for hint in MANIFEST_FORMAT_HINTS):
+  1132	        return True
+  1133	    if any(hint in format_id for hint in MANIFEST_FORMAT_HINTS):
+  1134	        return True
+  1135	    if ext in {"m3u8", "mpd"} or container in {"m3u8", "mpd"}:
+  1136	        return True
+  1137	    return ".m3u8" in url or ".mpd" in url
+  1138	
+  1139	
+  1140	def _pick_preferred_direct_audio_url(info: Dict[str, Any]) -> str | None:
+  1141	    candidate_formats: List[Dict[str, Any]] = []
+  1142	    requested_formats = info.get("requested_formats") or []
+  1143	    all_formats = info.get("formats") or []
+  1144	
+  1145	    for format_entry in requested_formats:
+  1146	        if not isinstance(format_entry, dict):
+  1147	            continue
+  1148	        candidate_formats.append({**format_entry, "__requested": True})
+  1149	
+  1150	    for format_entry in all_formats:
+  1151	        if not isinstance(format_entry, dict):
+  1152	            continue
+  1153	        candidate_formats.append({**format_entry, "__requested": False})
+  1154	
+  1155	    ranked_candidates: List[tuple[tuple[float, float, float, float, float, float], str]] = []
+  1156	    for format_entry in candidate_formats:
+  1157	        url = str(format_entry.get("url") or "")
+  1158	        if not url.startswith("http"):
+  1159	            continue
+  1160	
+  1161	        if _is_manifest_stream(format_entry):
+  1162	            continue
+  1163	
+  1164	        protocol = _normalize_format_value(format_entry.get("protocol"))
+  1165	        if protocol and protocol not in {"http", "https"}:
+  1166	            continue
+  1167	
+  1168	        vcodec = _normalize_format_value(format_entry.get("vcodec"))
+  1169	        acodec = _normalize_format_value(format_entry.get("acodec"))
+  1170	        has_audio = acodec not in {"", "none"} or vcodec == "none"
+  1171	        if not has_audio:
+  1172	            continue
+  1173	
+  1174	        is_audio_only = 0.0 if vcodec == "none" else 1.0
+  1175	        is_requested = 0.0 if format_entry.get("__requested") else 1.0
+  1176	        ext = _normalize_format_value(format_entry.get("ext"))
+  1177	        ext_rank = float(PREFERRED_AUDIO_EXT_RANK.get(ext, len(PREFERRED_AUDIO_EXT_RANK) + 1))
+  1178	        abr = _safe_float(format_entry.get("abr"), 0.0)
+  1179	        tbr = _safe_float(format_entry.get("tbr"), 0.0)
+  1180	        preference = _safe_float(format_entry.get("preference"), 0.0)
+  1181	
+  1182	        rank = (
+  1183	            is_requested,
+  1184	            is_audio_only,
+  1185	            ext_rank,
+  1186	            -abr,
+  1187	            -tbr,
+  1188	            -preference,
+  1189	        )
+  1190	        ranked_candidates.append((rank, url))
+  1191	
+  1192	    if not ranked_candidates:
+  1193	        return None
+  1194	
+  1195	    ranked_candidates.sort(key=lambda item: item[0])
+  1196	    return ranked_candidates[0][1]
+  1197	
+  1198	
+  1199	def _finalize_ytdlp_info(info: Any) -> tuple[str, str]:
+  1200	    if info is None:
+  1201	        raise RuntimeError("No media info returned by yt-dlp.")
+  1202	
+  1203	    if "entries" in info:
+  1204	        entries = info.get("entries") or []
+  1205	        info = next((entry for entry in entries if entry), None)
+  1206	
+  1207	    if info is None:
+  1208	        raise RuntimeError("No playable entry found in URL.")
+  1209	
+  1210	    title = str(info.get("title") or "Unknown title")
+  1211	    preferred_stream_url = _pick_preferred_direct_audio_url(info)
+  1212	    if isinstance(preferred_stream_url, str) and preferred_stream_url:
+  1213	        return title, preferred_stream_url
+  1214	
+  1215	    stream_url = info.get("url")
+  1216	    if not isinstance(stream_url, str) or not stream_url:
+  1217	        requested_formats = info.get("requested_formats") or []
+  1218	        for item in requested_formats:
+  1219	            candidate_url = item.get("url")
+  1220	            if isinstance(candidate_url, str) and candidate_url:
+  1221	                stream_url = candidate_url
+  1222	                break
+  1223	
+  1224	    if not isinstance(stream_url, str) or not stream_url:
+  1225	        raise RuntimeError("Could not resolve stream URL.")
+  1226	
+  1227	    if ".m3u8" in stream_url.lower() or ".mpd" in stream_url.lower():
+  1228	        logger.warning(
+  1229	            "Using fallback manifest stream URL for title=%s; direct HTTP audio was unavailable.",
+  1230	            title,
+  1231	        )
+  1232	
+  1233	    return title, stream_url
+  1234	
+  1235	
+  1236	def _extract_youtube_stream(url: str, format_override: str | None = None) -> tuple[str, str]:
+  1237	    if yt_dlp is None:
+  1238	        raise RuntimeError("yt-dlp is not installed on the server.")
+  1239	
+  1240	    attempts = _build_ytdlp_attempts()
+  1241	    saw_bot_check_error = False
+  1242	    saw_authenticated_bot_check_error = False
+  1243	    saw_format_unavailable_error = False
+  1244	    last_exception: Exception | None = None
+  1245	
+  1246	    for attempt_name, options, is_authenticated in attempts:
+  1247	        try:
+  1248	            current_options = dict(options)
+  1249	            if format_override:
+  1250	                current_options["format"] = format_override
+  1251	
+  1252	            with yt_dlp.YoutubeDL(current_options) as ydl:
+  1253	                info = ydl.extract_info(url, download=False)
+  1254	            return _finalize_ytdlp_info(info)
+  1255	        except Exception as exc:
+  1256	            last_exception = exc
+  1257	            error_text = str(exc)
+  1258	            if _looks_like_youtube_bot_check_error(error_text):
+  1259	                saw_bot_check_error = True
+  1260	                if is_authenticated:
+  1261	                    saw_authenticated_bot_check_error = True
+  1262	            if _looks_like_format_unavailable_error(error_text):
+  1263	                saw_format_unavailable_error = True
+  1264	            logger.warning(
+  1265	                "yt-dlp extraction attempt failed attempt=%s url=%s error=%s",
+  1266	                attempt_name,
+  1267	                url,
+  1268	                error_text,
+  1269	            )
+  1270	
+  1271	    if saw_bot_check_error:
+  1272	        configured_cookie_source = bool(
+  1273	            _resolve_ytdlp_cookie_file()
+  1274	            or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
+  1275	        )
+  1276	        if configured_cookie_source and not saw_authenticated_bot_check_error and saw_format_unavailable_error:
+  1277	            raise MusicExtractionError(
+  1278	                "Your YouTube cookies were used, but yt-dlp could not resolve a playable format. "
+  1279	                "Export fresh cookies, set MUSIC_BOT_YTDLP_COOKIES_B64 again, and restart backend."
+  1280	            )
+  1281	        if configured_cookie_source:
+  1282	            raise MusicExtractionError(
+  1283	                "YouTube blocked playback even with your cookie settings. "
+  1284	                "Re-login in your browser, restart the backend, then try again."
+  1285	            )
+  1286	
+  1287	        raise MusicExtractionError(
+  1288	            "YouTube asked for bot verification. Configure MUSIC_BOT_YTDLP_COOKIES_B64 "
+  1289	            "(or MUSIC_BOT_YTDLP_COOKIES_FILE / MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER) "
+  1290	            "and restart backend."
+  1291	        )
+  1292	
+  1293	    if saw_format_unavailable_error:
+  1294	        raise MusicExtractionError(
+  1295	            "YouTube did not provide a playable stream format for this link right now. "
+  1296	            "Try another link or refresh your cookies and retry."
+  1297	        )
+  1298	
+  1299	    raise RuntimeError(f"yt-dlp failed to extract stream: {last_exception}")
+
+[B4] Audio proxy endpoint used for streaming playback URLs
+--------------------------------------------------------------------
+  2022	@app.get("/audio-proxy")
+  2023	async def audio_proxy(url: str):
+  2024	    # Decode the URL if it's double-encoded
+  2025	    target_url = urllib.parse.unquote(url)
+  2026	    forwarded_headers = {
+  2027	        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+  2028	        "Accept": "audio/*,*/*;q=0.8",
+  2029	    }
+  2030	
+  2031	    async with httpx.AsyncClient() as client:
+  2032	        try:
+  2033	            probe_headers = dict(forwarded_headers)
+  2034	            content_type = "audio/mpeg"
+  2035	            response_headers: Dict[str, str] = {"Accept-Ranges": "bytes"}
+  2036	
+  2037	            # Probe metadata without downloading audio body.
+  2038	            try:
+  2039	                probe = await client.head(
+  2040	                    target_url,
+  2041	                    headers=probe_headers,
+  2042	                    follow_redirects=True,
+  2043	                    timeout=10.0,
+  2044	                )
+  2045	                if 200 <= probe.status_code < 400:
+  2046	                    content_type = probe.headers.get("Content-Type", content_type)
+  2047	                    response_headers["Accept-Ranges"] = probe.headers.get("Accept-Ranges", "bytes")
+  2048	                    for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
+  2049	                        header_value = probe.headers.get(header_name)
+  2050	                        if header_value:
+  2051	                            response_headers[header_name] = header_value
+  2052	                else:
+  2053	                    logger.warning(
+  2054	                        "Audio proxy HEAD probe failed status=%s url=%s",
+  2055	                        probe.status_code,
+  2056	                        target_url,
+  2057	                    )
+  2058	            except Exception as probe_exc:
+  2059	                logger.warning("Audio proxy HEAD probe failed url=%s error=%s", target_url, probe_exc)
+  2060	
+  2061	            async def stream_audio():
+  2062	                async with client.stream(
+  2063	                    "GET",
+  2064	                    target_url,
+  2065	                    headers=forwarded_headers,
+  2066	                    follow_redirects=True,
+  2067	                    timeout=30.0,
+  2068	                ) as resp:
+  2069	                    async for chunk in resp.aiter_bytes():
+  2070	                        yield chunk
+  2071	
+  2072	            return StreamingResponse(
+  2073	                stream_audio(),
+  2074	                media_type=content_type,
+  2075	                headers=response_headers,
+  2076	            )
+  2077	        except Exception as e:
+  2078	            logger.error(f"Proxy error: {e}")
+  2079	            raise HTTPException(status_code=500, detail="Could not proxy audio")
+
+[B5] Text websocket hook that triggers the music command
+--------------------------------------------------------------------
+  2202	                await manager.broadcast(broadcast_msg, channel_id)
+  2203	                if msg_type == "new_message":
+  2204	                    base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+  2205	                    await _handle_music_play_command(
+  2206	                        channel_id=channel_id,
+  2207	                        user_id=user_id,
+  2208	                        username=username,
+  2209	                        content=content,
+  2210	                        base_url=base_url,
+  2211	                    )
+  2212	
+  2213	            except json.JSONDecodeError:
+  2214	                db_message = models.Message(content=data_str, user_id=user_id, channel_id=channel_id)
+  2215	                db.add(db_message)
+  2216	                db.commit()
+  2217	                db.refresh(db_message)
+  2218	                broadcast_msg = json.dumps(
+  2219	                    {
+  2220	                        "type": "new_message",
+  2221	                        "id": db_message.id,
+  2222	                        "user_id": user_id,
+  2223	                        "username": username,
+  2224	                        "content": data_str,
+  2225	                        "timestamp": str(db_message.timestamp),
+  2226	                        "is_pinned": db_message.is_pinned,
+  2227	                        "pinned_at": str(db_message.pinned_at) if db_message.pinned_at else None,
+  2228	                        "pinned_by_user_id": db_message.pinned_by_user_id,
+  2229	                        "pinned_by_username": db_message.pinned_by_username,
+  2230	                    }
+  2231	                )
+  2232	                await manager.broadcast(broadcast_msg, channel_id)
+  2233	                base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+  2234	                await _handle_music_play_command(
+  2235	                    channel_id=channel_id,
+  2236	                    user_id=user_id,
+  2237	                    username=username,
+  2238	                    content=data_str,
+  2239	                    base_url=base_url,
+  2240	                )
+
+====================================================================
+SECTION C - FRONTEND MUSIC BOT LOGIC
+====================================================================
+FILE: frontend/lib/providers/app_state.dart
+
+[C1] Music player object and voice/chat state fields
+--------------------------------------------------------------------
+     1	import 'dart:async';
+     2	import 'dart:convert';
+     3	
+     4	import 'package:flutter/foundation.dart';
+     5	import 'package:flutter/material.dart';
+     6	import 'package:flutter/services.dart';
+     7	import 'package:audioplayers/audioplayers.dart';
+     8	import 'package:flutter_webrtc/flutter_webrtc.dart';
+     9	import 'package:http/http.dart' as http;
+    10	import 'package:web_socket_channel/web_socket_channel.dart';
+    11	
+    12	import '../models/chat_models.dart';
+    13	import '../utils/ws_channel_factory.dart';
+    14	
+    15	class AppState extends ChangeNotifier {
+    16	  // static const String baseUrl = "http://127.0.0.1:8000";
+    17	  // static const String wsUrl = "ws://127.0.0.1:8000/ws";
+    18	  static const String baseUrl = "https://extochatapp.onrender.com";
+    19	  static const String wsUrl = "wss://extochatapp.onrender.com/ws";
+    20	
+    21	  static const Map<String, dynamic> _rtcConfiguration = {
+    22	    'iceServers': [
+    23	      {'urls': 'stun:stun.l.google.com:19302'},
+    24	    ],
+    25	  };
+    26	
+    27	  User? currentUser;
+    28	  List<Channel> channels = [];
+    29	  Channel? activeChannel;
+    30	  WebSocketChannel? _channel;
+    31	  List<Message> messages = [];
+    32	  List<Message> pinnedMessages = [];
+    33	  bool pinnedMessagesLoading = false;
+    34	  String? pinnedMessagesError;
+    35	  List<Message> messageSearchResults = [];
+    36	  bool messageSearchLoading = false;
+    37	  String? messageSearchError;
+    38	
+    39	  List<VoiceChannel> voiceChannels = [];
+    40	  VoiceChannel? activeVoiceChannel;
+    41	  final Map<int, VoiceParticipant> voiceParticipants = {};
+    42	  List<User> adminUsers = [];
+    43	  User? selectedAdminUser;
+    44	  UserChannelPermissions? selectedUserChannelPermissions;
+    45	  bool adminUsersLoading = false;
+    46	  bool adminPermissionsLoading = false;
+    47	  String? adminPermissionsError;
+    48	  WebSocketChannel? _voiceSignalChannel;
+    49	  Timer? _voicePingTimer;
+    50	  MediaStream? _localStream;
+    51	  final Map<int, RTCPeerConnection> _peerConnections = {};
+    52	  final Map<int, MediaStream> _remoteStreams = {};
+    53	  final Map<int, RTCVideoRenderer> _remoteAudioRenderers = {};
+    54	  final Map<int, double> _voiceParticipantVolumes = {};
+    55	  final AudioPlayer _musicPlayer = AudioPlayer();
+    56	  final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
+    57	  final Set<int> _remoteDescriptionReadyUsers = <int>{};
+    58	  Future<void> _voiceSignalProcessingQueue = Future.value();
+    59	  Future<void>? _leaveVoiceChannelTask;
+    60	  bool isSelfMuted = false;
+    61	  bool _voiceConnecting = false;
+    62	  bool _voiceJoinInProgress = false;
+    63	  String? voiceError;
+    64	  Timer? _voiceDiagnosticsTimer;
+    65	  bool _voiceDiagnosticsInFlight = false;
+    66	  final Map<int, DateTime> _pendingVoicePings = {};
+    67	  final Map<int, RTCPeerConnectionState> _peerConnectionStates = {};
+    68	  int _voicePingSequence = 0;
+    69	  int? _voicePingMs;
+    70	  DateTime? _voiceConnectedAt;
+    71	  DateTime? _lastVoicePongAt;
+    72	  double _voiceMicLevel = 0;
+    73	  double _voiceOutboundBitrateKbps = 0;
+    74	  double _voiceOutboundPacketsPerSecond = 0;
+    75	  int? _lastStatsBytesSent;
+    76	  int? _lastStatsPacketsSent;
+    77	  DateTime? _lastStatsSnapshotAt;
+    78	  final List<MediaDeviceInfo> _audioInputDevices = [];
+    79	  String? _selectedAudioInputDeviceId;
+    80	  bool _audioInputDevicesLoading = false;
+    81	  bool _audioInputSwitching = false;
+    82	  RTCPeerConnection? _micProbeConnection;
+    83	  RTCRtpSender? _micProbeRtpSender;
+    84	  MediaStreamTrack? _micProbeTrack;
+    85	  double? _lastMicEnergy;
+    86	  double? _lastMicDuration;
+    87	  bool _isInputTestRunning = false;
+    88	  bool _isInputTestStarting = false;
+    89	  bool _inputTestUsesVoiceStream = false;
+    90	  String? _inputTestError;
+    91	  double _inputTestLevel = 0;
+    92	  MediaStream? _inputTestStream;
+    93	  RTCPeerConnection? _inputTestProbeConnection;
+    94	  RTCRtpSender? _inputTestProbeRtpSender;
+    95	  MediaStreamTrack? _inputTestProbeTrack;
+
+[C2] Text-channel listener for music bot notices
+--------------------------------------------------------------------
+  1294	    _channel = createWsChannel(
+  1295	      Uri.parse("$wsUrl/${channel.id}/${currentUser!.id}"),
+  1296	    );
+  1297	
+  1298	    _channel!.stream.listen((data) {
+  1299	      final json = jsonDecode(data);
+  1300	      final type = json['type'] ?? 'new_message';
+  1301	
+  1302	      if (type == 'new_message') {
+  1303	        final newMessage = Message.fromJson(json);
+  1304	        messages.add(newMessage);
+  1305	        if (newMessage.isPinned) {
+  1306	          _applyPinStateFromMessage(newMessage);
+  1307	        }
+  1308	        _scrollToBottom();
+  1309	      } else if (type == 'music_bot_notice') {
+  1310	        final content = (json['content'] ?? '').toString().trim();
+  1311	        if (content.isNotEmpty) {
+  1312	          _appendLocalSystemMessage(content);
+  1313	          _scrollToBottom();
+  1314	        }
+  1315	      } else if (type == 'edit_message') {
+
+[C3] Voice signal handling and music playback trigger
+--------------------------------------------------------------------
+  1466	  void _enqueueVoiceSignal(dynamic data) {
+  1467	    _voiceSignalProcessingQueue = _voiceSignalProcessingQueue
+  1468	        .then((_) => _handleVoiceSignal(data))
+  1469	        .catchError((_) {
+  1470	      // Keep the queue alive even if one payload fails.
+  1471	    });
+  1472	  }
+  1473	
+  1474	  Future<void> _handleVoiceSignal(dynamic data) async {
+  1475	    try {
+  1476	      final Map<String, dynamic> payload = jsonDecode(data);
+  1477	      final type = payload['type'];
+  1478	
+  1479	      if (type == 'voice_state') {
+  1480	        final participants = (payload['participants'] as List<dynamic>? ?? [])
+  1481	            .whereType<Map<dynamic, dynamic>>()
+  1482	            .map((p) => VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
+  1483	            .toList();
+  1484	
+  1485	        voiceParticipants
+  1486	          ..clear()
+  1487	          ..addEntries(participants.map((p) => MapEntry(p.userId, p)));
+  1488	        final participantIds = participants.map((p) => p.userId).toSet();
+  1489	        _voiceParticipantVolumes.removeWhere(
+  1490	          (userId, _) => !participantIds.contains(userId),
+  1491	        );
+  1492	
+  1493	        notifyListeners();
+  1494	        return;
+  1495	      }
+  1496	
+  1497	      if (type == 'participant_joined') {
+  1498	        final participant = VoiceParticipant.fromJson(payload);
+  1499	        voiceParticipants[participant.userId] = participant;
+  1500	
+  1501	        if (participant.userId != currentUser?.id) {
+  1502	          await _createOfferForUser(participant.userId);
+  1503	        }
+  1504	
+  1505	        notifyListeners();
+  1506	        return;
+  1507	      }
+  1508	
+  1509	      if (type == 'participant_left') {
+  1510	        final userId = payload['user_id'];
+  1511	        if (userId is int) {
+  1512	          voiceParticipants.remove(userId);
+  1513	          _voiceParticipantVolumes.remove(userId);
+  1514	          await _closePeerConnection(userId);
+  1515	          notifyListeners();
+  1516	        }
+  1517	        return;
+  1518	      }
+  1519	
+  1520	      if (type == 'mute_state') {
+  1521	        final userId = payload['user_id'];
+  1522	        final isMuted = payload['is_muted'] == true;
+  1523	        if (userId is int) {
+  1524	          final current = voiceParticipants[userId];
+  1525	          if (current != null) {
+  1526	            voiceParticipants[userId] = current.copyWith(isMuted: isMuted);
+  1527	          }
+  1528	          notifyListeners();
+  1529	        }
+  1530	        return;
+  1531	      }
+  1532	
+  1533	      if (type == 'music_play') {
+  1534	        await _handleMusicPlaySignal(payload);
+  1535	        return;
+  1536	      }
+  1537	
+  1538	      if (type == 'offer') {
+  1539	        await _handleOffer(payload);
+  1540	        return;
+  1541	      }
+  1542	
+  1543	      if (type == 'answer') {
+  1544	        await _handleAnswer(payload);
+  1545	        return;
+  1546	      }
+  1547	
+  1548	      if (type == 'ice_candidate') {
+  1549	        await _handleRemoteIceCandidate(payload);
+  1550	        return;
+  1551	      }
+  1552	
+  1553	      if (type == 'pong') {
+  1554	        _handleVoicePong(payload);
+  1555	        return;
+  1556	      }
+  1557	    } catch (_) {
+  1558	      // Ignore malformed signaling payloads.
+  1559	    }
+  1560	  }
+  1561	
+  1562	  Future<void> _handleMusicPlaySignal(Map<String, dynamic> payload) async {
+  1563	    final streamUrl = payload['stream_url'];
+  1564	    if (streamUrl is! String || streamUrl.isEmpty) {
+  1565	      voiceError = "Music bot sent an invalid stream URL.";
+  1566	      notifyListeners();
+  1567	      return;
+  1568	    }
+  1569	
+  1570	    try {
+  1571	      await _musicPlayer.stop();
+  1572	      await _musicPlayer.setSource(UrlSource(streamUrl));
+  1573	      await _musicPlayer.resume();
+  1574	    } catch (error) {
+  1575	      voiceError = "Unable to start music playback: $error";
+  1576	      notifyListeners();
+  1577	    }
+  1578	  }
+
+[C4] Voice leave flow stops currently playing music
+--------------------------------------------------------------------
+  1938	  Future<void> _leaveVoiceChannelInternal({
+  1939	    required bool notify,
+  1940	    required bool clearError,
+  1941	  }) async {
+  1942	    _voicePingTimer?.cancel();
+  1943	    _voicePingTimer = null;
+  1944	    _voiceDiagnosticsTimer?.cancel();
+  1945	    _voiceDiagnosticsTimer = null;
+  1946	    _voiceDiagnosticsInFlight = false;
+  1947	
+  1948	    if (clearError) {
+  1949	      voiceError = null;
+  1950	    }
+  1951	
+  1952	    final signalChannel = _voiceSignalChannel;
+  1953	    _voiceSignalChannel = null;
+  1954	
+  1955	    _voiceConnecting = false;
+  1956	    activeVoiceChannel = null;
+  1957	    isSelfMuted = false;
+  1958	    _voiceConnectedAt = null;
+  1959	    _queuedRemoteIceCandidates.clear();
+  1960	    _remoteDescriptionReadyUsers.clear();
+  1961	    _voiceSignalProcessingQueue = Future.value();
+  1962	    if (_inputTestUsesVoiceStream) {
+  1963	      await stopInputTest(notify: false);
+  1964	    }
+  1965	    _resetVoiceDiagnostics();
+  1966	    await _stopMicProbe();
+  1967	    await _musicPlayer.stop();
+  1968	
+  1969	    if (signalChannel != null) {
+  1970	      await signalChannel.sink.close();
+  1971	    }
+
+[C5] Local "Music Bot" chat message creation
+--------------------------------------------------------------------
+  2801	  void _appendLocalSystemMessage(String content) {
+  2802	    messages.add(
+  2803	      Message(
+  2804	        id: _nextLocalMessageId--,
+  2805	        userId: 0,
+  2806	        username: "Music Bot",
+  2807	        content: content,
+  2808	        timestamp: DateTime.now().toUtc().toIso8601String(),
+  2809	      ),
+  2810	    );
+  2811	  }
+
+[C6] App disposal cleans up music player
+--------------------------------------------------------------------
+  2923	  @override
+  2924	  void dispose() {
+  2925	    _channel?.sink.close();
+  2926	    _voiceSignalChannel?.sink.close();
+  2927	    _voicePingTimer?.cancel();
+  2928	    _voicePingTimer = null;
+  2929	    _voiceDiagnosticsTimer?.cancel();
+  2930	    _voiceDiagnosticsTimer = null;
+  2931	    _inputTestTimer?.cancel();
+  2932	    _inputTestTimer = null;
+  2933	    unawaited(_stopMicProbe());
+  2934	    unawaited(_musicPlayer.dispose());
+  2935	    unawaited(stopInputTest(notify: false));
+
+====================================================================
+SECTION D - HOW THIS WAS PLANNED TO WORK (INTENDED FLOW)
+====================================================================
+1) A user types a normal chat message like: play <url or song name>.
+2) Backend text websocket (`/ws/{channel_id}/{user_id}`) always runs `_handle_music_play_command(...)` for new messages.
+3) `_handle_music_play_command`:
+   - Parses the command.
+   - Verifies the user is currently in a voice channel (`voice_manager.find_channel_for_user`).
+   - Resolves a playable stream URL via yt-dlp (with multiple strategies and optional cookie sources).
+   - Wraps the stream URL with `/audio-proxy` when possible.
+   - Broadcasts a `music_play` event to everyone in that voice channel.
+   - Broadcasts a `music_bot_notice` in text chat (e.g., “Now playing: ...”).
+4) Frontend receives:
+   - `music_bot_notice` on the text websocket, shown as a local chat message from "Music Bot".
+   - `music_play` on the voice websocket, then `_handleMusicPlaySignal` starts playback using `audioplayers` (`setSource(UrlSource(...))` + `resume()`).
+5) When leaving voice channel or disposing app state, frontend stops/disposes the music player.
+
+Implementation notes visible from code:
+- Spotify links are converted to yt-dlp search (`ytsearch1:<spotify_url>`) rather than direct Spotify streaming.
+- SoundCloud gets a custom format preference to avoid manifest/HLS when possible.
+- `/audio-proxy` streams remote audio bytes to clients and forwards useful headers.
+- `spotipy` exists in requirements but is not used in the shown backend music command path.
