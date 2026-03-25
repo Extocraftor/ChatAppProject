@@ -1102,6 +1102,8 @@ def _build_ytdlp_options(
     if format_selector:
         options["format"] = format_selector
 
+    youtube_extractor_args: Dict[str, Any] = {}
+
     if use_tuned_extractor:
         player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
         player_clients = [
@@ -1113,11 +1115,19 @@ def _build_ytdlp_options(
             item.strip() for item in player_skip_raw.split(",") if item.strip()
         ] or ["webpage", "configs"]
 
+        youtube_extractor_args["player_client"] = player_clients
+        youtube_extractor_args["player_skip"] = player_skip
+
+    po_token_raw = os.getenv("MUSIC_BOT_YTDLP_PO_TOKEN", "").strip()
+    visitor_data = os.getenv("MUSIC_BOT_YTDLP_VISITOR_DATA", "").strip()
+    if po_token_raw and visitor_data:
+        po_token = po_token_raw if "+" in po_token_raw else f"web+{po_token_raw}"
+        youtube_extractor_args["po_token"] = [po_token]
+        youtube_extractor_args["visitor_data"] = [visitor_data]
+
+    if youtube_extractor_args:
         options["extractor_args"] = {
-            "youtube": {
-                "player_client": player_clients,
-                "player_skip": player_skip,
-            }
+            "youtube": youtube_extractor_args,
         }
 
     return options
@@ -1443,10 +1453,26 @@ def _extract_youtube_stream(url: str, format_override: str | None = None) -> tup
             _resolve_ytdlp_cookie_file()
             or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
         )
+        configured_po_token_source = bool(
+            os.getenv("MUSIC_BOT_YTDLP_PO_TOKEN", "").strip()
+            and os.getenv("MUSIC_BOT_YTDLP_VISITOR_DATA", "").strip()
+        )
         if configured_cookie_source and not saw_authenticated_bot_check_error and saw_format_unavailable_error:
             raise MusicExtractionError(
                 "Your YouTube cookies were used, but yt-dlp could not resolve a playable format. "
                 "Export fresh cookies, set MUSIC_BOT_YTDLP_COOKIES_B64 again, and restart backend."
+            )
+        if configured_po_token_source and configured_cookie_source:
+            raise MusicExtractionError(
+                "YouTube blocked playback even with your cookie and PO token settings. "
+                "Regenerate MUSIC_BOT_YTDLP_PO_TOKEN / MUSIC_BOT_YTDLP_VISITOR_DATA "
+                "and refresh cookies, then restart backend."
+            )
+        if configured_po_token_source:
+            raise MusicExtractionError(
+                "YouTube blocked playback even with your PO token settings. "
+                "Regenerate MUSIC_BOT_YTDLP_PO_TOKEN and MUSIC_BOT_YTDLP_VISITOR_DATA, "
+                "then restart backend."
             )
         if configured_cookie_source:
             raise MusicExtractionError(
@@ -1455,7 +1481,9 @@ def _extract_youtube_stream(url: str, format_override: str | None = None) -> tup
             )
 
         raise MusicExtractionError(
-            "YouTube asked for bot verification. Configure MUSIC_BOT_YTDLP_COOKIES_B64 "
+            "YouTube asked for bot verification. Configure PO token auth via "
+            "MUSIC_BOT_YTDLP_PO_TOKEN + MUSIC_BOT_YTDLP_VISITOR_DATA (recommended), "
+            "or configure cookies with MUSIC_BOT_YTDLP_COOKIES_B64 "
             "(or MUSIC_BOT_YTDLP_COOKIES_FILE / MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER) "
             "and restart backend."
         )
