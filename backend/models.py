@@ -18,7 +18,11 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     role = Column(String, default="member", nullable=False)
-    messages = relationship("Message", back_populates="user")
+    messages = relationship(
+        "Message",
+        back_populates="user",
+        foreign_keys="Message.user_id",
+    )
     created_channels = relationship(
         "Channel",
         back_populates="creator",
@@ -122,7 +126,11 @@ class Message(Base):
     pinned_at = Column(DateTime, nullable=True)
     pinned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
-    user = relationship("User", back_populates="messages")
+    user = relationship(
+        "User",
+        back_populates="messages",
+        foreign_keys=[user_id],
+    )
     channel = relationship("Channel", back_populates="messages")
     parent = relationship("Message", remote_side=[id], backref="replies")
     pinned_by = relationship("User", foreign_keys=[pinned_by_user_id])
