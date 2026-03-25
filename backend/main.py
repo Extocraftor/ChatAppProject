@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+from datetime import datetime
 from typing import Any, Dict, List
 import urllib.parse
 
@@ -120,6 +121,22 @@ def _ensure_schema_columns() -> None:
                 text(
                     "ALTER TABLE voice_channels ADD COLUMN admin_only BOOLEAN NOT NULL DEFAULT FALSE"
                 )
+            )
+
+        message_columns = {
+            column["name"] for column in inspector.get_columns("messages")
+        }
+        if "is_pinned" not in message_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE messages ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+        if "pinned_at" not in message_columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN pinned_at TIMESTAMP"))
+        if "pinned_by_user_id" not in message_columns:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN pinned_by_user_id INTEGER")
             )
 
 
@@ -444,6 +461,10 @@ def _is_staff(user: models.User) -> bool:
 
 def _is_admin(user: models.User) -> bool:
     return user.role == ROLE_ADMIN
+
+
+def _can_pin_messages(user: models.User) -> bool:
+    return _is_staff(user)
 
 
 def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
@@ -1704,11 +1725,171 @@ def get_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_
 
     return (
         db.query(models.Message)
-        .options(joinedload(models.Message.user))
+        .options(
+            joinedload(models.Message.user),
+            joinedload(models.Message.parent).joinedload(models.Message.user),
+            joinedload(models.Message.pinned_by),
+        )
         .filter(models.Message.channel_id == channel_id)
         .order_by(models.Message.timestamp.asc())
         .all()
     )
+
+
+@app.get(
+    "/channels/{channel_id}/search/messages",
+    response_model=List[schemas.MessageSchema],
+)
+def search_messages(
+    channel_id: int,
+    actor_user_id: int,
+    query: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        return []
+
+    safe_limit = max(1, min(limit, 100))
+    like_pattern = f"%{normalized_query}%"
+
+    return (
+        db.query(models.Message)
+        .options(
+            joinedload(models.Message.user),
+            joinedload(models.Message.parent).joinedload(models.Message.user),
+            joinedload(models.Message.pinned_by),
+        )
+        .filter(
+            models.Message.channel_id == channel_id,
+            models.Message.content.ilike(like_pattern),
+        )
+        .order_by(models.Message.timestamp.desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+
+@app.get("/channels/{channel_id}/pins", response_model=List[schemas.MessageSchema])
+def list_pinned_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+
+    return (
+        db.query(models.Message)
+        .options(
+            joinedload(models.Message.user),
+            joinedload(models.Message.parent).joinedload(models.Message.user),
+            joinedload(models.Message.pinned_by),
+        )
+        .filter(
+            models.Message.channel_id == channel_id,
+            models.Message.is_pinned.is_(True),
+        )
+        .order_by(models.Message.pinned_at.desc(), models.Message.id.desc())
+        .all()
+    )
+
+
+@app.post("/channels/{channel_id}/pins/{message_id}", response_model=schemas.MessageSchema)
+async def pin_message(
+    channel_id: int,
+    message_id: int,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+    if not _can_pin_messages(actor_user):
+        raise HTTPException(status_code=403, detail="Only moderators/admins can pin messages")
+
+    target_message = (
+        db.query(models.Message)
+        .filter(
+            models.Message.id == message_id,
+            models.Message.channel_id == channel_id,
+        )
+        .first()
+    )
+    if not target_message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if not target_message.is_pinned:
+        target_message.is_pinned = True
+        target_message.pinned_at = datetime.utcnow()
+        target_message.pinned_by_user_id = actor_user.id
+        db.commit()
+    db.refresh(target_message)
+
+    await manager.broadcast(
+        json.dumps(
+            {
+                "type": "pin_message",
+                "id": target_message.id,
+                "is_pinned": True,
+                "pinned_at": str(target_message.pinned_at) if target_message.pinned_at else None,
+                "pinned_by_user_id": target_message.pinned_by_user_id,
+                "pinned_by_username": target_message.pinned_by_username,
+            }
+        ),
+        channel_id,
+    )
+
+    return target_message
+
+
+@app.delete("/channels/{channel_id}/pins/{message_id}")
+async def unpin_message(
+    channel_id: int,
+    message_id: int,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+    if not _can_pin_messages(actor_user):
+        raise HTTPException(status_code=403, detail="Only moderators/admins can unpin messages")
+
+    target_message = (
+        db.query(models.Message)
+        .filter(
+            models.Message.id == message_id,
+            models.Message.channel_id == channel_id,
+        )
+        .first()
+    )
+    if not target_message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if target_message.is_pinned:
+        target_message.is_pinned = False
+        target_message.pinned_at = None
+        target_message.pinned_by_user_id = None
+        db.commit()
+
+    await manager.broadcast(
+        json.dumps(
+            {
+                "type": "unpin_message",
+                "id": target_message.id,
+            }
+        ),
+        channel_id,
+    )
+
+    return {"detail": "Message unpinned"}
 
 
 @app.post("/voice-channels/", response_model=schemas.VoiceChannelSchema)
@@ -1962,6 +2143,10 @@ async def websocket_endpoint(
                             "parent_id": db_message.parent_id,
                             "parent_username": db_message.parent_username,
                             "parent_content": db_message.parent_content,
+                            "is_pinned": db_message.is_pinned,
+                            "pinned_at": str(db_message.pinned_at) if db_message.pinned_at else None,
+                            "pinned_by_user_id": db_message.pinned_by_user_id,
+                            "pinned_by_username": db_message.pinned_by_username,
                         }
                     )
 
@@ -2038,6 +2223,10 @@ async def websocket_endpoint(
                         "username": username,
                         "content": data_str,
                         "timestamp": str(db_message.timestamp),
+                        "is_pinned": db_message.is_pinned,
+                        "pinned_at": str(db_message.pinned_at) if db_message.pinned_at else None,
+                        "pinned_by_user_id": db_message.pinned_by_user_id,
+                        "pinned_by_username": db_message.pinned_by_username,
                     }
                 )
                 await manager.broadcast(broadcast_msg, channel_id)

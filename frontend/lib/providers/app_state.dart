@@ -29,6 +29,12 @@ class AppState extends ChangeNotifier {
   Channel? activeChannel;
   WebSocketChannel? _channel;
   List<Message> messages = [];
+  List<Message> pinnedMessages = [];
+  bool pinnedMessagesLoading = false;
+  String? pinnedMessagesError;
+  List<Message> messageSearchResults = [];
+  bool messageSearchLoading = false;
+  String? messageSearchError;
 
   List<VoiceChannel> voiceChannels = [];
   VoiceChannel? activeVoiceChannel;
@@ -699,6 +705,8 @@ class AppState extends ChangeNotifier {
           _channel = null;
           activeChannel = null;
           messages = [];
+          pinnedMessages = [];
+          clearMessageSearch(notify: false);
         }
       }
 
@@ -729,6 +737,8 @@ class AppState extends ChangeNotifier {
         _channel = null;
         activeChannel = null;
         messages = [];
+        pinnedMessages = [];
+        clearMessageSearch(notify: false);
       }
 
       await fetchChannels();
@@ -1094,6 +1104,160 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void clearMessageSearch({bool notify = true}) {
+    messageSearchResults = [];
+    messageSearchLoading = false;
+    messageSearchError = null;
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> searchMessages(String query, {int limit = 50}) async {
+    final channelId = activeChannel?.id;
+    final userId = currentUser?.id;
+    if (channelId == null || userId == null) {
+      return;
+    }
+
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty) {
+      clearMessageSearch();
+      return;
+    }
+
+    messageSearchLoading = true;
+    messageSearchError = null;
+    notifyListeners();
+
+    try {
+      final response = await http.get(
+        Uri.parse("$baseUrl/channels/$channelId/search/messages").replace(
+          queryParameters: {
+            "actor_user_id": "$userId",
+            "query": normalizedQuery,
+            "limit": "${limit.clamp(1, 100)}",
+          },
+        ),
+      );
+      if (response.statusCode == 200) {
+        final List data = jsonDecode(response.body);
+        messageSearchResults = data.map((m) => Message.fromJson(m)).toList();
+      } else {
+        messageSearchResults = [];
+        messageSearchError =
+            "Unable to search messages (${response.statusCode})";
+      }
+    } catch (_) {
+      messageSearchResults = [];
+      messageSearchError = "Unable to search messages";
+    } finally {
+      messageSearchLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> fetchPinnedMessages() async {
+    final channelId = activeChannel?.id;
+    final userId = currentUser?.id;
+    if (channelId == null || userId == null) {
+      pinnedMessages = [];
+      pinnedMessagesLoading = false;
+      pinnedMessagesError = null;
+      notifyListeners();
+      return;
+    }
+
+    pinnedMessagesLoading = true;
+    pinnedMessagesError = null;
+    notifyListeners();
+
+    try {
+      final response = await http.get(
+        Uri.parse("$baseUrl/channels/$channelId/pins").replace(
+          queryParameters: {
+            "actor_user_id": "$userId",
+          },
+        ),
+      );
+      if (response.statusCode == 200) {
+        final List data = jsonDecode(response.body);
+        pinnedMessages = data.map((m) => Message.fromJson(m)).toList();
+      } else {
+        pinnedMessages = [];
+        pinnedMessagesError =
+            "Unable to load pinned messages (${response.statusCode})";
+      }
+    } catch (_) {
+      pinnedMessages = [];
+      pinnedMessagesError = "Unable to load pinned messages";
+    } finally {
+      pinnedMessagesLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> pinMessage(int messageId) async {
+    final channelId = activeChannel?.id;
+    final userId = currentUser?.id;
+    if (channelId == null || userId == null || !canModerateChannels) {
+      return false;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/channels/$channelId/pins/$messageId").replace(
+          queryParameters: {
+            "actor_user_id": "$userId",
+          },
+        ),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+
+      final payload = Message.fromJson(jsonDecode(response.body));
+      _applyPinStateFromMessage(payload);
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> unpinMessage(int messageId) async {
+    final channelId = activeChannel?.id;
+    final userId = currentUser?.id;
+    if (channelId == null || userId == null || !canModerateChannels) {
+      return false;
+    }
+
+    try {
+      final response = await http.delete(
+        Uri.parse("$baseUrl/channels/$channelId/pins/$messageId").replace(
+          queryParameters: {
+            "actor_user_id": "$userId",
+          },
+        ),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+
+      _applyPinStateById(
+        messageId: messageId,
+        isPinned: false,
+        pinnedAt: null,
+        pinnedByUserId: null,
+        pinnedByUsername: null,
+      );
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> fetchMessages(int channelId) async {
     final userId = currentUser?.id;
     if (userId == null) {
@@ -1116,11 +1280,16 @@ class AppState extends ChangeNotifier {
   void selectChannel(Channel channel) {
     activeChannel = channel;
     messages = [];
+    pinnedMessages = [];
+    pinnedMessagesError = null;
+    pinnedMessagesLoading = false;
     replyingTo = null;
     editingMessage = null;
+    clearMessageSearch(notify: false);
     _channel?.sink.close();
 
     fetchMessages(channel.id);
+    unawaited(fetchPinnedMessages());
 
     _channel = createWsChannel(
       Uri.parse("$wsUrl/${channel.id}/${currentUser!.id}"),
@@ -1133,6 +1302,9 @@ class AppState extends ChangeNotifier {
       if (type == 'new_message') {
         final newMessage = Message.fromJson(json);
         messages.add(newMessage);
+        if (newMessage.isPinned) {
+          _applyPinStateFromMessage(newMessage);
+        }
         _scrollToBottom();
       } else if (type == 'music_bot_notice') {
         final content = (json['content'] ?? '').toString().trim();
@@ -1147,9 +1319,44 @@ class AppState extends ChangeNotifier {
         if (index != -1) {
           messages[index] = messages[index].copyWith(content: content);
         }
+        final searchIndex = messageSearchResults.indexWhere((m) => m.id == id);
+        if (searchIndex != -1) {
+          messageSearchResults[searchIndex] =
+              messageSearchResults[searchIndex].copyWith(content: content);
+        }
+        final pinnedIndex = pinnedMessages.indexWhere((m) => m.id == id);
+        if (pinnedIndex != -1) {
+          pinnedMessages[pinnedIndex] =
+              pinnedMessages[pinnedIndex].copyWith(content: content);
+        }
       } else if (type == 'delete_message') {
         final id = json['id'];
         messages.removeWhere((m) => m.id == id);
+        messageSearchResults.removeWhere((m) => m.id == id);
+        pinnedMessages.removeWhere((m) => m.id == id);
+      } else if (type == 'pin_message') {
+        final id = json['id'];
+        if (id is int) {
+          _applyPinStateById(
+            messageId: id,
+            isPinned: true,
+            pinnedAt: json['pinned_at']?.toString(),
+            pinnedByUserId:
+                json['pinned_by_user_id'] is int ? json['pinned_by_user_id'] : null,
+            pinnedByUsername: json['pinned_by_username']?.toString(),
+          );
+        }
+      } else if (type == 'unpin_message') {
+        final id = json['id'];
+        if (id is int) {
+          _applyPinStateById(
+            messageId: id,
+            isPinned: false,
+            pinnedAt: null,
+            pinnedByUserId: null,
+            pinnedByUsername: null,
+          );
+        }
       }
       notifyListeners();
     });
@@ -2601,6 +2808,80 @@ class AppState extends ChangeNotifier {
         timestamp: DateTime.now().toUtc().toIso8601String(),
       ),
     );
+  }
+
+  void _applyPinStateFromMessage(Message source) {
+    _applyPinStateById(
+      messageId: source.id,
+      isPinned: source.isPinned,
+      pinnedAt: source.pinnedAt,
+      pinnedByUserId: source.pinnedByUserId,
+      pinnedByUsername: source.pinnedByUsername,
+    );
+  }
+
+  void _applyPinStateById({
+    required int messageId,
+    required bool isPinned,
+    required String? pinnedAt,
+    required int? pinnedByUserId,
+    required String? pinnedByUsername,
+  }) {
+    final messageIndex = messages.indexWhere((message) => message.id == messageId);
+    if (messageIndex != -1) {
+      final existing = messages[messageIndex];
+      messages[messageIndex] = existing.copyWith(
+        isPinned: isPinned,
+        pinnedAt: pinnedAt,
+        pinnedByUserId: pinnedByUserId,
+        pinnedByUsername: pinnedByUsername,
+      );
+    }
+
+    final searchIndex = messageSearchResults
+        .indexWhere((message) => message.id == messageId);
+    if (searchIndex != -1) {
+      final existing = messageSearchResults[searchIndex];
+      messageSearchResults[searchIndex] = existing.copyWith(
+        isPinned: isPinned,
+        pinnedAt: pinnedAt,
+        pinnedByUserId: pinnedByUserId,
+        pinnedByUsername: pinnedByUsername,
+      );
+    }
+
+    if (!isPinned) {
+      pinnedMessages.removeWhere((message) => message.id == messageId);
+      return;
+    }
+
+    final messageToPin = messageIndex != -1
+        ? messages[messageIndex]
+        : (searchIndex != -1 ? messageSearchResults[searchIndex] : null);
+    if (messageToPin == null) {
+      return;
+    }
+
+    final pinnedIndex =
+        pinnedMessages.indexWhere((message) => message.id == messageId);
+    if (pinnedIndex == -1) {
+      pinnedMessages.add(messageToPin);
+    } else {
+      pinnedMessages[pinnedIndex] = messageToPin;
+    }
+
+    DateTime parseSortDate(Message message) {
+      final pinnedDate = message.pinnedAt != null
+          ? DateTime.tryParse(message.pinnedAt!)
+          : null;
+      if (pinnedDate != null) {
+        return pinnedDate;
+      }
+      return DateTime.tryParse(message.timestamp) ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    }
+
+    pinnedMessages.sort((a, b) => parseSortDate(b).compareTo(parseSortDate(a)));
   }
 
   void sendMessage(String content) {

@@ -19,6 +19,10 @@ class MessageSchema(MessageBase):
     parent_id: Optional[int] = None
     parent_username: Optional[str] = None
     parent_content: Optional[str] = None
+    is_pinned: bool = False
+    pinned_at: Optional[datetime] = None
+    pinned_by_user_id: Optional[int] = None
+    pinned_by_username: Optional[str] = None
 
     class Config:
         from_attributes = True

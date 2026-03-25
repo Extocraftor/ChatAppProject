@@ -66,12 +66,31 @@ class _MessageItemState extends State<MessageItem> {
     );
   }
 
+  Future<void> _togglePin(BuildContext context, AppState state) async {
+    final message = widget.message;
+    final success = message.isPinned
+        ? await state.unpinMessage(message.id)
+        : await state.pinMessage(message.id);
+    if (!success && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            message.isPinned
+                ? "Unable to unpin message"
+                : "Unable to pin message",
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final isHighlighted = state.highlightedMessageId == widget.message.id;
     final isOwnMessage = state.currentUser?.id == widget.message.userId;
     final canDeleteMessage = isOwnMessage || state.canDeleteAnyMessage;
+    final canPinMessage = state.canModerateChannels;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
@@ -143,6 +162,14 @@ class _MessageItemState extends State<MessageItem> {
                                     fontWeight: FontWeight.bold,
                                     color: Colors.white),
                               ),
+                              if (widget.message.isPinned) ...[
+                                const SizedBox(width: 6),
+                                const Icon(
+                                  Icons.push_pin,
+                                  size: 14,
+                                  color: Colors.amberAccent,
+                                ),
+                              ],
                               const SizedBox(width: 8),
                               Text(
                                 _formatTimestamp(widget.message.timestamp),
@@ -200,6 +227,22 @@ class _MessageItemState extends State<MessageItem> {
                               size: 18, color: Colors.redAccent),
                           onPressed: () => _showDeleteDialog(context, state),
                           tooltip: "Delete",
+                          constraints: const BoxConstraints(),
+                        ),
+                      if (canPinMessage)
+                        IconButton(
+                          icon: Icon(
+                            widget.message.isPinned
+                                ? Icons.push_pin
+                                : Icons.push_pin_outlined,
+                            size: 18,
+                            color: widget.message.isPinned
+                                ? Colors.amberAccent
+                                : Colors.grey,
+                          ),
+                          onPressed: () => _togglePin(context, state),
+                          tooltip:
+                              widget.message.isPinned ? "Unpin" : "Pin",
                           constraints: const BoxConstraints(),
                         ),
                     ],

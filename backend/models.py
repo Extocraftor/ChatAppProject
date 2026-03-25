@@ -118,10 +118,14 @@ class Message(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     channel_id = Column(Integer, ForeignKey("channels.id"))
     parent_id = Column(Integer, ForeignKey("messages.id"), nullable=True)
+    is_pinned = Column(Boolean, nullable=False, default=False)
+    pinned_at = Column(DateTime, nullable=True)
+    pinned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     user = relationship("User", back_populates="messages")
     channel = relationship("Channel", back_populates="messages")
     parent = relationship("Message", remote_side=[id], backref="replies")
+    pinned_by = relationship("User", foreign_keys=[pinned_by_user_id])
 
     @property
     def username(self):
@@ -134,3 +138,7 @@ class Message(Base):
     @property
     def parent_content(self):
         return self.parent.content if self.parent else None
+
+    @property
+    def pinned_by_username(self):
+        return self.pinned_by.username if self.pinned_by else None

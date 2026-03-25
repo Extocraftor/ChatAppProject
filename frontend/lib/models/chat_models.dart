@@ -100,6 +100,10 @@ class Message {
   final int? parentId;
   final String? parentUsername;
   final String? parentContent;
+  final bool isPinned;
+  final String? pinnedAt;
+  final int? pinnedByUserId;
+  final String? pinnedByUsername;
 
   Message({
     required this.id,
@@ -110,10 +114,18 @@ class Message {
     this.parentId,
     this.parentUsername,
     this.parentContent,
+    this.isPinned = false,
+    this.pinnedAt,
+    this.pinnedByUserId,
+    this.pinnedByUsername,
   });
 
   Message copyWith({
     String? content,
+    bool? isPinned,
+    String? pinnedAt,
+    int? pinnedByUserId,
+    String? pinnedByUsername,
   }) {
     return Message(
       id: id,
@@ -124,6 +136,10 @@ class Message {
       parentId: parentId,
       parentUsername: parentUsername,
       parentContent: parentContent,
+      isPinned: isPinned ?? this.isPinned,
+      pinnedAt: pinnedAt ?? this.pinnedAt,
+      pinnedByUserId: pinnedByUserId ?? this.pinnedByUserId,
+      pinnedByUsername: pinnedByUsername ?? this.pinnedByUsername,
     );
   }
 
@@ -137,6 +153,10 @@ class Message {
       parentId: json['parent_id'],
       parentUsername: json['parent_username'],
       parentContent: json['parent_content'],
+      isPinned: json['is_pinned'] == true,
+      pinnedAt: json['pinned_at'],
+      pinnedByUserId: json['pinned_by_user_id'],
+      pinnedByUsername: json['pinned_by_username'],
     );
   }
 }
