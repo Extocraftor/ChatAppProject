@@ -234,7 +234,7 @@ class _MessageSearchDialogState extends State<_MessageSearchDialog> {
 
   String _searchSubtitle(Message message) {
     final timestamp = _formatTimestamp(message.timestamp);
-    return "${message.username}  •  $timestamp";
+    return "${message.username}  |  $timestamp";
   }
 }
 
@@ -360,9 +360,9 @@ class _PinnedMessagesDialogState extends State<_PinnedMessagesDialog> {
     final pinnedAt = message.pinnedAt ?? message.timestamp;
     final pinnedAtText = _formatTimestamp(pinnedAt);
     if (pinnedBy == null || pinnedBy.isEmpty) {
-      return "${message.username}  •  Pinned at $pinnedAtText";
+      return "${message.username}  |  Pinned at $pinnedAtText";
     }
-    return "${message.username}  •  Pinned by $pinnedBy at $pinnedAtText";
+    return "${message.username}  |  Pinned by $pinnedBy at $pinnedAtText";
   }
 }
 
