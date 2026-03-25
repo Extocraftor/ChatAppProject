@@ -5,14 +5,25 @@ import logging
 import os
 import re
 import tempfile
+from uuid import uuid4
 from datetime import datetime
 from typing import Any, Dict, List
 import urllib.parse
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, joinedload
 
@@ -41,6 +52,8 @@ ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
 PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
+MENTION_PATTERN = re.compile(r"(?<!\w)@([A-Za-z0-9_.-]{1,32})")
+MENTION_TRAILING_CHARS = ".,!?;:)]}"
 YOUTUBE_URL_PATTERN = re.compile(
     r"^(https?://)?((www|m|music)\.)?(youtube\.com|youtu\.be)/.+$",
     re.IGNORECASE,
@@ -67,6 +80,12 @@ PREFERRED_AUDIO_EXT_ORDER = ("mp3", "m4a", "aac", "opus", "ogg", "webm", "wav")
 PREFERRED_AUDIO_EXT_RANK = {
     ext: rank for rank, ext in enumerate(PREFERRED_AUDIO_EXT_ORDER)
 }
+MAX_ATTACHMENT_BYTES = int(os.getenv("MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
+ATTACHMENT_UPLOAD_DIR = os.getenv(
+    "ATTACHMENT_UPLOAD_DIR",
+    os.path.join(os.path.dirname(__file__), "uploads"),
+)
+os.makedirs(ATTACHMENT_UPLOAD_DIR, exist_ok=True)
 
 
 class MusicExtractionError(RuntimeError):
@@ -138,6 +157,24 @@ def _ensure_schema_columns() -> None:
             conn.execute(
                 text("ALTER TABLE messages ADD COLUMN pinned_by_user_id INTEGER")
             )
+        if "attachment_url" not in message_columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN attachment_url VARCHAR"))
+        if "attachment_name" not in message_columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN attachment_name VARCHAR"))
+        if "attachment_content_type" not in message_columns:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN attachment_content_type VARCHAR")
+            )
+        if "attachment_size" not in message_columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN attachment_size INTEGER"))
+        if "mentioned_user_ids_json" not in message_columns:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN mentioned_user_ids_json VARCHAR")
+            )
+        if "mentioned_usernames_json" not in message_columns:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN mentioned_usernames_json VARCHAR")
+            )
 
 
 def _seed_existing_user_roles() -> None:
@@ -190,6 +227,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/uploads", StaticFiles(directory=ATTACHMENT_UPLOAD_DIR), name="uploads")
 
 
 # Connection Manager for text channels
@@ -802,6 +840,73 @@ def _can_view_voice_channel(db: Session, user: models.User, channel_id: int) -> 
     if not channel:
         return False
     return not bool(channel.admin_only)
+
+
+def _normalize_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _extract_mentions(content: Any, db: Session) -> tuple[List[int], List[str]]:
+    normalized_content = _normalize_message_content(content)
+    if not normalized_content:
+        return [], []
+
+    tokens: List[str] = []
+    for match in MENTION_PATTERN.finditer(normalized_content):
+        token = match.group(1).rstrip(MENTION_TRAILING_CHARS).strip()
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered not in tokens:
+            tokens.append(lowered)
+    if not tokens:
+        return [], []
+
+    user_lookup: Dict[str, tuple[int, str]] = {}
+    for user_id, username in db.query(models.User.id, models.User.username).all():
+        if not username:
+            continue
+        key = username.strip().lower()
+        if key and key not in user_lookup:
+            user_lookup[key] = (int(user_id), username)
+
+    mentioned_user_ids: List[int] = []
+    mentioned_usernames: List[str] = []
+    for token in tokens:
+        matched_user = user_lookup.get(token)
+        if not matched_user:
+            continue
+        user_id, username = matched_user
+        mentioned_user_ids.append(user_id)
+        mentioned_usernames.append(username)
+
+    return mentioned_user_ids, mentioned_usernames
+
+
+def _serialize_message_payload(message: models.Message, payload_type: str) -> Dict[str, Any]:
+    return {
+        "type": payload_type,
+        "id": message.id,
+        "user_id": message.user_id,
+        "username": message.username,
+        "content": message.content,
+        "timestamp": str(message.timestamp),
+        "parent_id": message.parent_id,
+        "parent_username": message.parent_username,
+        "parent_content": message.parent_content,
+        "is_pinned": message.is_pinned,
+        "pinned_at": str(message.pinned_at) if message.pinned_at else None,
+        "pinned_by_user_id": message.pinned_by_user_id,
+        "pinned_by_username": message.pinned_by_username,
+        "attachment_url": message.attachment_url,
+        "attachment_name": message.attachment_name,
+        "attachment_content_type": message.attachment_content_type,
+        "attachment_size": message.attachment_size,
+        "mentioned_user_ids": message.mentioned_user_ids,
+        "mentioned_usernames": message.mentioned_usernames,
+    }
 
 
 def _build_user_channel_permissions_response(
@@ -1716,6 +1821,83 @@ async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depe
     return {"detail": "Channel deleted"}
 
 
+@app.post("/channels/{channel_id}/attachments", response_model=schemas.MessageSchema)
+async def upload_channel_attachment(
+    channel_id: int,
+    actor_user_id: int,
+    file: UploadFile = File(...),
+    content: str = Form(""),
+    parent_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+
+    db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not db_channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    if parent_id is not None:
+        parent_message = (
+            db.query(models.Message)
+            .filter(
+                models.Message.id == parent_id,
+                models.Message.channel_id == channel_id,
+            )
+            .first()
+        )
+        if not parent_message:
+            raise HTTPException(status_code=404, detail="Parent message not found")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Attachment is empty")
+    if len(payload) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes",
+        )
+
+    original_name = os.path.basename((file.filename or "attachment").strip()) or "attachment"
+    _, extension = os.path.splitext(original_name)
+    stored_name = f"{uuid4().hex}{extension[:16]}"
+    storage_path = os.path.join(ATTACHMENT_UPLOAD_DIR, stored_name)
+
+    try:
+        with open(storage_path, "wb") as output:
+            output.write(payload)
+    except Exception:
+        logger.exception("Failed to save attachment to disk path=%s", storage_path)
+        raise HTTPException(status_code=500, detail="Unable to save attachment")
+
+    normalized_content = _normalize_message_content(content)
+    mentioned_user_ids, mentioned_usernames = _extract_mentions(normalized_content, db)
+
+    db_message = models.Message(
+        content=normalized_content,
+        user_id=actor_user.id,
+        channel_id=channel_id,
+        parent_id=parent_id,
+        attachment_url=f"/uploads/{stored_name}",
+        attachment_name=original_name[:255],
+        attachment_content_type=(file.content_type or "application/octet-stream")[:255],
+        attachment_size=len(payload),
+        mentioned_user_ids_json=json.dumps(mentioned_user_ids),
+        mentioned_usernames_json=json.dumps(mentioned_usernames),
+    )
+    db.add(db_message)
+    db.commit()
+    db.refresh(db_message)
+
+    await manager.broadcast(
+        json.dumps(_serialize_message_payload(db_message, "new_message")),
+        channel_id,
+    )
+    return db_message
+
+
 @app.get("/channels/{channel_id}/messages/", response_model=List[schemas.MessageSchema])
 def get_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
     actor_user = _ensure_actor_user(db, actor_user_id)
@@ -2122,32 +2304,25 @@ async def websocket_endpoint(
 
                 if msg_type == "new_message":
                     parent_id = data_json.get("parent_id")
+                    normalized_content = _normalize_message_content(content)
+                    mentioned_user_ids, mentioned_usernames = _extract_mentions(
+                        normalized_content,
+                        db,
+                    )
                     db_message = models.Message(
-                        content=content,
+                        content=normalized_content,
                         user_id=user_id,
                         channel_id=channel_id,
                         parent_id=parent_id,
+                        mentioned_user_ids_json=json.dumps(mentioned_user_ids),
+                        mentioned_usernames_json=json.dumps(mentioned_usernames),
                     )
                     db.add(db_message)
                     db.commit()
                     db.refresh(db_message)
 
                     broadcast_msg = json.dumps(
-                        {
-                            "type": "new_message",
-                            "id": db_message.id,
-                            "user_id": user_id,
-                            "username": username,
-                            "content": content,
-                            "timestamp": str(db_message.timestamp),
-                            "parent_id": db_message.parent_id,
-                            "parent_username": db_message.parent_username,
-                            "parent_content": db_message.parent_content,
-                            "is_pinned": db_message.is_pinned,
-                            "pinned_at": str(db_message.pinned_at) if db_message.pinned_at else None,
-                            "pinned_by_user_id": db_message.pinned_by_user_id,
-                            "pinned_by_username": db_message.pinned_by_username,
-                        }
+                        _serialize_message_payload(db_message, "new_message")
                     )
 
                 elif msg_type == "edit_message":
@@ -2160,7 +2335,14 @@ async def websocket_endpoint(
                     if not db_message:
                         continue
 
-                    db_message.content = content
+                    normalized_content = _normalize_message_content(content)
+                    mentioned_user_ids, mentioned_usernames = _extract_mentions(
+                        normalized_content,
+                        db,
+                    )
+                    db_message.content = normalized_content
+                    db_message.mentioned_user_ids_json = json.dumps(mentioned_user_ids)
+                    db_message.mentioned_usernames_json = json.dumps(mentioned_usernames)
                     db.commit()
                     db.refresh(db_message)
 
@@ -2168,7 +2350,9 @@ async def websocket_endpoint(
                         {
                             "type": "edit_message",
                             "id": db_message.id,
-                            "content": content,
+                            "content": normalized_content,
+                            "mentioned_user_ids": db_message.mentioned_user_ids,
+                            "mentioned_usernames": db_message.mentioned_usernames,
                         }
                     )
 
@@ -2211,23 +2395,19 @@ async def websocket_endpoint(
                     )
 
             except json.JSONDecodeError:
-                db_message = models.Message(content=data_str, user_id=user_id, channel_id=channel_id)
+                mentioned_user_ids, mentioned_usernames = _extract_mentions(data_str, db)
+                db_message = models.Message(
+                    content=data_str,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    mentioned_user_ids_json=json.dumps(mentioned_user_ids),
+                    mentioned_usernames_json=json.dumps(mentioned_usernames),
+                )
                 db.add(db_message)
                 db.commit()
                 db.refresh(db_message)
                 broadcast_msg = json.dumps(
-                    {
-                        "type": "new_message",
-                        "id": db_message.id,
-                        "user_id": user_id,
-                        "username": username,
-                        "content": data_str,
-                        "timestamp": str(db_message.timestamp),
-                        "is_pinned": db_message.is_pinned,
-                        "pinned_at": str(db_message.pinned_at) if db_message.pinned_at else None,
-                        "pinned_by_user_id": db_message.pinned_by_user_id,
-                        "pinned_by_username": db_message.pinned_by_username,
-                    }
+                    _serialize_message_payload(db_message, "new_message")
                 )
                 await manager.broadcast(broadcast_msg, channel_id)
                 base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))

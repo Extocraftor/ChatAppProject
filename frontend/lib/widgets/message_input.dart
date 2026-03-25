@@ -1,6 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../models/chat_models.dart';
 import '../providers/app_state.dart';
 
 class MessageInput extends StatefulWidget {
@@ -11,11 +15,14 @@ class MessageInput extends StatefulWidget {
 }
 
 class _MessageInputState extends State<MessageInput> {
+  static const int _maxAttachmentBytes = 10 * 1024 * 1024;
+
   final TextEditingController _controller = TextEditingController();
   final TextEditingController _emojiSearchController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   final FocusNode _emojiSearchFocusNode = FocusNode();
   final LayerLink _emojiPickerLayerLink = LayerLink();
+  PlatformFile? _selectedAttachment;
   bool _showEmojiPicker = false;
   OverlayEntry? _emojiOverlayEntry;
 
@@ -114,7 +121,15 @@ class _MessageInputState extends State<MessageInput> {
   @override
   void initState() {
     super.initState();
+    _controller.addListener(_onComposerChanged);
     _emojiSearchController.addListener(_onEmojiSearchChanged);
+  }
+
+  void _onComposerChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
   }
 
   void _onEmojiSearchChanged() {
@@ -135,12 +150,71 @@ class _MessageInputState extends State<MessageInput> {
         .toList(growable: false);
   }
 
-  void _submit() {
+  Future<void> _submit() async {
+    final state = context.read<AppState>();
     final content = _controller.text;
-    if (content.trim().isNotEmpty) {
-      context.read<AppState>().sendMessage(content);
-      _controller.clear();
+    final hasText = content.trim().isNotEmpty;
+    final editingMessage = state.editingMessage;
+
+    if (state.attachmentUploadInProgress) {
+      return;
     }
+
+    if (editingMessage != null) {
+      if (_selectedAttachment != null) {
+        _showInlineError("Remove the attachment before editing this message");
+        return;
+      }
+      if (hasText) {
+        state.sendMessage(content);
+        _controller.clear();
+      }
+      if (_showEmojiPicker) {
+        _closeEmojiPicker(requestKeyboard: true);
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _focusNode.requestFocus();
+        }
+      });
+      return;
+    }
+
+    final selectedAttachment = _selectedAttachment;
+    if (selectedAttachment != null) {
+      final Uint8List? attachmentBytes = selectedAttachment.bytes;
+      if (attachmentBytes == null || attachmentBytes.isEmpty) {
+        _showInlineError("Unable to read attachment data");
+        return;
+      }
+
+      final uploaded = await state.sendAttachmentMessage(
+        bytes: attachmentBytes,
+        filename: selectedAttachment.name,
+        content: content,
+        parentId: state.replyingTo?.id,
+      );
+      if (!uploaded) {
+        _showInlineError(state.attachmentUploadError ?? "Unable to upload attachment");
+        return;
+      }
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _selectedAttachment = null;
+      });
+      _controller.clear();
+      state.setReplyingTo(null);
+    } else if (hasText) {
+      state.sendMessage(content);
+      _controller.clear();
+    } else {
+      return;
+    }
+
     if (_showEmojiPicker) {
       _closeEmojiPicker(requestKeyboard: true);
       return;
@@ -150,6 +224,123 @@ class _MessageInputState extends State<MessageInput> {
         _focusNode.requestFocus();
       }
     });
+  }
+
+  Future<void> _pickAttachment() async {
+    final state = context.read<AppState>();
+    if (state.editingMessage != null) {
+      _showInlineError("Attachments are disabled while editing a message");
+      return;
+    }
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: false,
+        withData: true,
+      );
+      if (!mounted || result == null || result.files.isEmpty) {
+        return;
+      }
+
+      final file = result.files.first;
+      final bytes = file.bytes;
+      if (bytes == null || bytes.isEmpty) {
+        _showInlineError("Unable to read selected file");
+        return;
+      }
+      if (bytes.length > _maxAttachmentBytes) {
+        _showInlineError("Attachment exceeds 10 MB limit");
+        return;
+      }
+
+      setState(() {
+        _selectedAttachment = file;
+      });
+      if (_showEmojiPicker) {
+        _closeEmojiPicker(requestKeyboard: true);
+      }
+    } catch (_) {
+      _showInlineError("Unable to pick attachment");
+    }
+  }
+
+  void _showInlineError(String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  _MentionQuery? _activeMentionQuery() {
+    final text = _controller.text;
+    if (text.isEmpty) {
+      return null;
+    }
+
+    final selection = _controller.selection;
+    final cursor = selection.baseOffset < 0 ? text.length : selection.baseOffset;
+    if (cursor > text.length) {
+      return null;
+    }
+
+    final prefix = text.substring(0, cursor);
+    final atIndex = prefix.lastIndexOf('@');
+    if (atIndex == -1) {
+      return null;
+    }
+
+    if (atIndex > 0 && !_isMentionBoundary(prefix[atIndex - 1])) {
+      return null;
+    }
+
+    final query = prefix.substring(atIndex + 1);
+    if (query.contains(RegExp(r'\s'))) {
+      return null;
+    }
+
+    return _MentionQuery(start: atIndex, end: cursor, query: query);
+  }
+
+  bool _isMentionBoundary(String character) {
+    return !RegExp(r'[A-Za-z0-9_]').hasMatch(character);
+  }
+
+  void _insertMention(String username) {
+    final mentionQuery = _activeMentionQuery();
+    if (mentionQuery == null) {
+      return;
+    }
+
+    final text = _controller.text;
+    final replacement = "@$username ";
+    final updatedText = text.replaceRange(
+      mentionQuery.start,
+      mentionQuery.end,
+      replacement,
+    );
+    final newCursor = mentionQuery.start + replacement.length;
+    _controller.value = TextEditingValue(
+      text: updatedText,
+      selection: TextSelection.collapsed(offset: newCursor),
+      composing: TextRange.empty,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusNode.requestFocus();
+      }
+    });
+  }
+
+  String _formatByteCount(int bytes) {
+    if (bytes < 1024) {
+      return "$bytes B";
+    }
+    if (bytes < 1024 * 1024) {
+      return "${(bytes / 1024).toStringAsFixed(1)} KB";
+    }
+    return "${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB";
   }
 
   void _toggleEmojiPicker() {
@@ -382,6 +573,7 @@ class _MessageInputState extends State<MessageInput> {
     _removeEmojiOverlay();
     _focusNode.dispose();
     _emojiSearchFocusNode.dispose();
+    _controller.removeListener(_onComposerChanged);
     _controller.dispose();
     _emojiSearchController.removeListener(_onEmojiSearchChanged);
     _emojiSearchController.dispose();
@@ -394,7 +586,14 @@ class _MessageInputState extends State<MessageInput> {
     final activeChannel = state.activeChannel;
     final replyingTo = state.replyingTo;
     final editingMessage = state.editingMessage;
-    final hasContextBanner = replyingTo != null || editingMessage != null;
+    final selectedAttachment = _selectedAttachment;
+    final mentionQuery = _activeMentionQuery();
+    final mentionSuggestions = mentionQuery == null
+        ? const <User>[]
+        : state.findMentionCandidates(mentionQuery.query);
+    final showMentionSuggestions = mentionSuggestions.isNotEmpty;
+    final hasReplyOrEditBanner = replyingTo != null || editingMessage != null;
+    final hasContextBanner = hasReplyOrEditBanner || selectedAttachment != null;
 
     if (editingMessage != null &&
         _controller.text != editingMessage.content &&
@@ -407,7 +606,35 @@ class _MessageInputState extends State<MessageInput> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (hasContextBanner)
+          if (showMentionSuggestions)
+            Container(
+              constraints: const BoxConstraints(maxHeight: 180),
+              margin: const EdgeInsets.only(bottom: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2F3136),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF202225)),
+              ),
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: mentionSuggestions.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final user = mentionSuggestions[index];
+                  return ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.alternate_email, size: 16),
+                    title: Text(
+                      user.username,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(user.role),
+                    onTap: () => _insertMention(user.username),
+                  );
+                },
+              ),
+            ),
+          if (hasReplyOrEditBanner)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               margin: const EdgeInsets.only(bottom: 0),
@@ -448,12 +675,59 @@ class _MessageInputState extends State<MessageInput> {
                 ],
               ),
             ),
+          if (selectedAttachment != null)
+            Container(
+              margin: const EdgeInsets.only(bottom: 0),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: const BoxDecoration(
+                color: Color(0xFF2F3136),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.attach_file, size: 16, color: Colors.grey),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      selectedAttachment.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (selectedAttachment.bytes != null) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      _formatByteCount(selectedAttachment.bytes!.length),
+                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                  ],
+                  const SizedBox(width: 8),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 16, color: Colors.grey),
+                    onPressed: state.attachmentUploadInProgress
+                        ? null
+                        : () {
+                            setState(() {
+                              _selectedAttachment = null;
+                            });
+                          },
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
+            ),
           CompositedTransformTarget(
             link: _emojiPickerLayerLink,
             child: TextField(
               controller: _controller,
               focusNode: _focusNode,
-              onSubmitted: (_) => _submit(),
+              onSubmitted: (_) {
+                _submit();
+              },
               textInputAction: TextInputAction.send,
               autofocus: true,
               onTap: () => _closeEmojiPicker(requestKeyboard: false),
@@ -467,10 +741,19 @@ class _MessageInputState extends State<MessageInput> {
                   borderRadius: _inputBorderRadius(hasContextBanner: hasContextBanner),
                   borderSide: BorderSide.none,
                 ),
-                suffixIconConstraints: const BoxConstraints(minWidth: 96),
+                suffixIconConstraints: const BoxConstraints(minWidth: 144),
                 suffixIcon: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    IconButton(
+                      tooltip: 'Attach file',
+                      icon: const Icon(Icons.attach_file),
+                      onPressed: state.attachmentUploadInProgress
+                          ? null
+                          : () {
+                              _pickAttachment();
+                            },
+                    ),
                     IconButton(
                       tooltip: _showEmojiPicker ? 'Use keyboard' : 'Add emoji',
                       icon: Icon(
@@ -478,12 +761,27 @@ class _MessageInputState extends State<MessageInput> {
                             ? Icons.keyboard
                             : Icons.emoji_emotions_outlined,
                       ),
-                      onPressed: _toggleEmojiPicker,
+                      onPressed: state.attachmentUploadInProgress
+                          ? null
+                          : _toggleEmojiPicker,
                     ),
-                    IconButton(
-                      icon: Icon(editingMessage != null ? Icons.check : Icons.send),
-                      onPressed: _submit,
-                    ),
+                    state.attachmentUploadInProgress
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 12),
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : IconButton(
+                            icon: Icon(
+                              editingMessage != null ? Icons.check : Icons.send,
+                            ),
+                            onPressed: () {
+                              _submit();
+                            },
+                          ),
                   ],
                 ),
               ),
@@ -494,6 +792,18 @@ class _MessageInputState extends State<MessageInput> {
       ),
     );
   }
+}
+
+class _MentionQuery {
+  const _MentionQuery({
+    required this.start,
+    required this.end,
+    required this.query,
+  });
+
+  final int start;
+  final int end;
+  final String query;
 }
 
 class _EmojiOption {

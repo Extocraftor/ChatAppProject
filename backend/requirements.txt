@@ -11,3 +11,4 @@ gunicorn
 yt-dlp
 httpx
 spotipy
+python-multipart

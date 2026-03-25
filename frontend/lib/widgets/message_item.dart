@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
 
@@ -84,6 +85,105 @@ class _MessageItemState extends State<MessageItem> {
     }
   }
 
+  TextSpan _buildMessageContentSpan(Message message) {
+    const defaultStyle = TextStyle(color: Color(0xFFDCDDDE));
+    final content = message.content;
+    if (content.isEmpty) {
+      return const TextSpan(text: '', style: defaultStyle);
+    }
+
+    final mentionPattern = RegExp(r'@([A-Za-z0-9_.-]+)');
+    final mentionNames = message.mentionedUsernames
+        .map((name) => name.toLowerCase())
+        .toSet();
+    final spans = <TextSpan>[];
+    var cursor = 0;
+    for (final match in mentionPattern.allMatches(content)) {
+      if (match.start > cursor) {
+        spans.add(
+          TextSpan(
+            text: content.substring(cursor, match.start),
+            style: defaultStyle,
+          ),
+        );
+      }
+
+      final mentionToken = (match.group(1) ?? '').toLowerCase();
+      final isMention = mentionNames.isEmpty || mentionNames.contains(mentionToken);
+      spans.add(
+        TextSpan(
+          text: content.substring(match.start, match.end),
+          style: isMention
+              ? const TextStyle(
+                  color: Colors.lightBlueAccent,
+                  fontWeight: FontWeight.w700,
+                )
+              : defaultStyle,
+        ),
+      );
+      cursor = match.end;
+    }
+
+    if (cursor < content.length) {
+      spans.add(
+        TextSpan(
+          text: content.substring(cursor),
+          style: defaultStyle,
+        ),
+      );
+    }
+
+    return TextSpan(style: defaultStyle, children: spans);
+  }
+
+  bool _isImageAttachment(Message message) {
+    final contentType = (message.attachmentContentType ?? '').toLowerCase();
+    if (contentType.startsWith('image/')) {
+      return true;
+    }
+
+    final name = (message.attachmentName ?? '').toLowerCase();
+    return name.endsWith('.png') ||
+        name.endsWith('.jpg') ||
+        name.endsWith('.jpeg') ||
+        name.endsWith('.gif') ||
+        name.endsWith('.webp') ||
+        name.endsWith('.bmp');
+  }
+
+  String _formatAttachmentSize(int? sizeBytes) {
+    if (sizeBytes == null || sizeBytes <= 0) {
+      return '';
+    }
+    if (sizeBytes < 1024) {
+      return '$sizeBytes B';
+    }
+    if (sizeBytes < 1024 * 1024) {
+      return '${(sizeBytes / 1024).toStringAsFixed(1)} KB';
+    }
+    return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  Future<void> _openAttachmentUrl(BuildContext context, String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      if (!context.mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid attachment URL')),
+      );
+      return;
+    }
+
+    final opened = await launchUrl(uri, mode: LaunchMode.platformDefault);
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open attachment')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -91,6 +191,13 @@ class _MessageItemState extends State<MessageItem> {
     final isOwnMessage = state.currentUser?.id == widget.message.userId;
     final canDeleteMessage = isOwnMessage || state.canDeleteAnyMessage;
     final canPinMessage = state.canModerateChannels;
+    final attachmentPath = widget.message.attachmentUrl;
+    final attachmentUrl = (attachmentPath == null || attachmentPath.isEmpty)
+        ? null
+        : state.resolveMediaUrl(attachmentPath);
+    final hasImageAttachment =
+        attachmentUrl != null && _isImageAttachment(widget.message);
+    final hasTextContent = widget.message.content.trim().isNotEmpty;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
@@ -178,10 +285,92 @@ class _MessageItemState extends State<MessageItem> {
                               ),
                             ],
                           ),
-                          SelectableText(
-                            widget.message.content,
-                            style: const TextStyle(color: Color(0xFFDCDDDE)),
-                          ),
+                          if (hasTextContent)
+                            SelectableText.rich(
+                              _buildMessageContentSpan(widget.message),
+                            ),
+                          if (attachmentUrl != null) ...[
+                            if (hasTextContent) const SizedBox(height: 8),
+                            if (hasImageAttachment)
+                              InkWell(
+                                onTap: () =>
+                                    _openAttachmentUrl(context, attachmentUrl),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.network(
+                                    attachmentUrl,
+                                    fit: BoxFit.cover,
+                                    width: 320,
+                                    height: 220,
+                                    errorBuilder: (_, __, ___) => Container(
+                                      width: 320,
+                                      height: 80,
+                                      color: const Color(0xFF2F3136),
+                                      alignment: Alignment.center,
+                                      child: const Text(
+                                        "Unable to load image",
+                                        style: TextStyle(color: Colors.grey),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else
+                              InkWell(
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () =>
+                                    _openAttachmentUrl(context, attachmentUrl),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 8,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF2F3136),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: const Color(0xFF202225),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.attach_file,
+                                        size: 16,
+                                        color: Colors.lightBlueAccent,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          widget.message.attachmentName ??
+                                              "Attachment",
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      if (_formatAttachmentSize(
+                                              widget.message.attachmentSize)
+                                          .isNotEmpty) ...[
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          _formatAttachmentSize(
+                                              widget.message.attachmentSize),
+                                          style: const TextStyle(
+                                            color: Colors.grey,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                      const SizedBox(width: 8),
+                                      const Icon(
+                                        Icons.open_in_new,
+                                        size: 15,
+                                        color: Colors.grey,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
                         ],
                       ),
                     ),

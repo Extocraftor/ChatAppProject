@@ -1,3 +1,4 @@
+import json
 from sqlalchemy import (
     Boolean,
     Column,
@@ -125,6 +126,12 @@ class Message(Base):
     is_pinned = Column(Boolean, nullable=False, default=False)
     pinned_at = Column(DateTime, nullable=True)
     pinned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    attachment_url = Column(String, nullable=True)
+    attachment_name = Column(String, nullable=True)
+    attachment_content_type = Column(String, nullable=True)
+    attachment_size = Column(Integer, nullable=True)
+    mentioned_user_ids_json = Column(String, nullable=True)
+    mentioned_usernames_json = Column(String, nullable=True)
     
     user = relationship(
         "User",
@@ -150,3 +157,46 @@ class Message(Base):
     @property
     def pinned_by_username(self):
         return self.pinned_by.username if self.pinned_by else None
+
+    @property
+    def mentioned_user_ids(self):
+        raw_value = self.mentioned_user_ids_json
+        if not raw_value:
+            return []
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+
+        values = []
+        for item in parsed:
+            try:
+                value = int(item)
+            except (TypeError, ValueError):
+                continue
+            if value not in values:
+                values.append(value)
+        return values
+
+    @property
+    def mentioned_usernames(self):
+        raw_value = self.mentioned_usernames_json
+        if not raw_value:
+            return []
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+
+        values = []
+        for item in parsed:
+            value = str(item).strip()
+            if not value:
+                continue
+            if value not in values:
+                values.append(value)
+        return values

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -40,11 +41,14 @@ class AppState extends ChangeNotifier {
   VoiceChannel? activeVoiceChannel;
   final Map<int, VoiceParticipant> voiceParticipants = {};
   List<User> adminUsers = [];
+  List<User> mentionableUsers = [];
   User? selectedAdminUser;
   UserChannelPermissions? selectedUserChannelPermissions;
   bool adminUsersLoading = false;
   bool adminPermissionsLoading = false;
   String? adminPermissionsError;
+  bool attachmentUploadInProgress = false;
+  String? attachmentUploadError;
   WebSocketChannel? _voiceSignalChannel;
   Timer? _voicePingTimer;
   MediaStream? _localStream;
@@ -177,6 +181,42 @@ class AppState extends ChangeNotifier {
     return role == "admin" || role == "moderator";
   }
   bool get canCreateChannels => canModerateChannels;
+
+  String resolveMediaUrl(String rawPathOrUrl) {
+    final value = rawPathOrUrl.trim();
+    if (value.isEmpty) {
+      return value;
+    }
+    return Uri.parse(baseUrl).resolve(value).toString();
+  }
+
+  List<User> findMentionCandidates(String query, {int limit = 8}) {
+    final normalized = query.trim().toLowerCase();
+    final selfId = currentUser?.id;
+
+    final users = mentionableUsers.where((user) => user.id != selfId).toList();
+    if (normalized.isEmpty) {
+      return users.take(limit).toList();
+    }
+
+    users.sort((a, b) {
+      final aName = a.username.toLowerCase();
+      final bName = b.username.toLowerCase();
+      final aStarts = aName.startsWith(normalized);
+      final bStarts = bName.startsWith(normalized);
+      if (aStarts != bStarts) {
+        return aStarts ? -1 : 1;
+      }
+      final aContains = aName.contains(normalized);
+      final bContains = bName.contains(normalized);
+      if (aContains != bContains) {
+        return aContains ? -1 : 1;
+      }
+      return aName.compareTo(bName);
+    });
+    return users.take(limit).toList();
+  }
+
   bool canDeleteTextChannel(Channel channel) {
     final userId = currentUser?.id;
     if (userId == null) {
@@ -262,6 +302,7 @@ class AppState extends ChangeNotifier {
         if (!isAdmin) {
           _clearAdminPermissionState(notify: false);
         }
+        await fetchMentionableUsers(notify: false);
         await fetchChannels();
         await fetchVoiceChannels();
         await refreshAudioInputDevices(notify: false);
@@ -273,6 +314,33 @@ class AppState extends ChangeNotifier {
       return data['detail'] ?? "Login failed";
     } catch (_) {
       return "Connection error";
+    }
+  }
+
+  Future<void> fetchMentionableUsers({bool notify = true}) async {
+    if (currentUser == null) {
+      mentionableUsers = [];
+      if (notify) {
+        notifyListeners();
+      }
+      return;
+    }
+
+    try {
+      final response = await http.get(Uri.parse("$baseUrl/users/"));
+      if (response.statusCode == 200) {
+        final List data = jsonDecode(response.body);
+        mentionableUsers = data.map((item) => User.fromJson(item)).toList();
+        mentionableUsers.sort(
+          (a, b) => a.username.toLowerCase().compareTo(b.username.toLowerCase()),
+        );
+      }
+    } catch (_) {
+      // Mention lookup is optional; ignore failures and keep old list.
+    }
+
+    if (notify) {
+      notifyListeners();
     }
   }
 
@@ -1258,6 +1326,88 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<bool> sendAttachmentMessage({
+    required Uint8List bytes,
+    required String filename,
+    String? content,
+    int? parentId,
+  }) async {
+    final channelId = activeChannel?.id;
+    final userId = currentUser?.id;
+    if (channelId == null || userId == null || bytes.isEmpty) {
+      return false;
+    }
+
+    attachmentUploadInProgress = true;
+    attachmentUploadError = null;
+    notifyListeners();
+
+    try {
+      final uri = Uri.parse("$baseUrl/channels/$channelId/attachments").replace(
+        queryParameters: {
+          "actor_user_id": "$userId",
+        },
+      );
+      final request = http.MultipartRequest("POST", uri);
+      request.fields["content"] = (content ?? "").trim();
+      if (parentId != null) {
+        request.fields["parent_id"] = "$parentId";
+      }
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          "file",
+          bytes,
+          filename: filename,
+        ),
+      );
+
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        String detail = "Unable to upload attachment (${response.statusCode})";
+        try {
+          final payload = jsonDecode(response.body);
+          final serverDetail = payload["detail"]?.toString().trim();
+          if (serverDetail != null && serverDetail.isNotEmpty) {
+            detail = serverDetail;
+          }
+        } catch (_) {
+          // Ignore non-JSON errors.
+        }
+        attachmentUploadError = detail;
+        return false;
+      }
+
+      final responseBody = response.body.trim();
+      if (responseBody.isNotEmpty) {
+        try {
+          final uploadedMessage = Message.fromJson(jsonDecode(responseBody));
+          final existingIndex =
+              messages.indexWhere((message) => message.id == uploadedMessage.id);
+          if (existingIndex == -1) {
+            messages.add(uploadedMessage);
+            if (uploadedMessage.isPinned) {
+              _applyPinStateFromMessage(uploadedMessage);
+            }
+          }
+        } catch (_) {
+          // Socket push will still update message list.
+        }
+      }
+
+      replyingTo = null;
+      attachmentUploadError = null;
+      return true;
+    } catch (_) {
+      attachmentUploadError = "Unable to upload attachment";
+      return false;
+    } finally {
+      attachmentUploadInProgress = false;
+      notifyListeners();
+      _scrollToBottom();
+    }
+  }
+
   Future<void> fetchMessages(int channelId) async {
     final userId = currentUser?.id;
     if (userId == null) {
@@ -1314,20 +1464,36 @@ class AppState extends ChangeNotifier {
         }
       } else if (type == 'edit_message') {
         final id = json['id'];
-        final content = json['content'];
+        final content = json['content']?.toString() ?? '';
+        final mentionedUserIds =
+            _parseMentionUserIds(json['mentioned_user_ids']);
+        final mentionedUsernames =
+            _parseMentionUsernames(json['mentioned_usernames']);
         final index = messages.indexWhere((m) => m.id == id);
         if (index != -1) {
-          messages[index] = messages[index].copyWith(content: content);
+          messages[index] = messages[index].copyWith(
+            content: content,
+            mentionedUserIds: mentionedUserIds,
+            mentionedUsernames: mentionedUsernames,
+          );
         }
         final searchIndex = messageSearchResults.indexWhere((m) => m.id == id);
         if (searchIndex != -1) {
           messageSearchResults[searchIndex] =
-              messageSearchResults[searchIndex].copyWith(content: content);
+              messageSearchResults[searchIndex].copyWith(
+            content: content,
+            mentionedUserIds: mentionedUserIds,
+            mentionedUsernames: mentionedUsernames,
+          );
         }
         final pinnedIndex = pinnedMessages.indexWhere((m) => m.id == id);
         if (pinnedIndex != -1) {
           pinnedMessages[pinnedIndex] =
-              pinnedMessages[pinnedIndex].copyWith(content: content);
+              pinnedMessages[pinnedIndex].copyWith(
+            content: content,
+            mentionedUserIds: mentionedUserIds,
+            mentionedUsernames: mentionedUsernames,
+          );
         }
       } else if (type == 'delete_message') {
         final id = json['id'];
@@ -2882,6 +3048,31 @@ class AppState extends ChangeNotifier {
     }
 
     pinnedMessages.sort((a, b) => parseSortDate(b).compareTo(parseSortDate(a)));
+  }
+
+  List<int> _parseMentionUserIds(dynamic rawValue) {
+    if (rawValue is! List) {
+      return const <int>[];
+    }
+    return rawValue
+        .map((value) {
+          if (value is int) {
+            return value;
+          }
+          return int.tryParse(value.toString());
+        })
+        .whereType<int>()
+        .toList(growable: false);
+  }
+
+  List<String> _parseMentionUsernames(dynamic rawValue) {
+    if (rawValue is! List) {
+      return const <String>[];
+    }
+    return rawValue
+        .map((value) => value.toString().trim())
+        .where((value) => value.isNotEmpty)
+        .toList(growable: false);
   }
 
   void sendMessage(String content) {

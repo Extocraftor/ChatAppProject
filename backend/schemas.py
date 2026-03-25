@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
@@ -23,6 +23,12 @@ class MessageSchema(MessageBase):
     pinned_at: Optional[datetime] = None
     pinned_by_user_id: Optional[int] = None
     pinned_by_username: Optional[str] = None
+    attachment_url: Optional[str] = None
+    attachment_name: Optional[str] = None
+    attachment_content_type: Optional[str] = None
+    attachment_size: Optional[int] = None
+    mentioned_user_ids: List[int] = Field(default_factory=list)
+    mentioned_usernames: List[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

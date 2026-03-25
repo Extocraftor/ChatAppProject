@@ -92,6 +92,8 @@ class VoiceParticipant {
 }
 
 class Message {
+  static const Object _unset = Object();
+
   final int id;
   final int userId;
   final String username;
@@ -104,6 +106,12 @@ class Message {
   final String? pinnedAt;
   final int? pinnedByUserId;
   final String? pinnedByUsername;
+  final String? attachmentUrl;
+  final String? attachmentName;
+  final String? attachmentContentType;
+  final int? attachmentSize;
+  final List<int> mentionedUserIds;
+  final List<String> mentionedUsernames;
 
   Message({
     required this.id,
@@ -118,14 +126,29 @@ class Message {
     this.pinnedAt,
     this.pinnedByUserId,
     this.pinnedByUsername,
-  });
+    this.attachmentUrl,
+    this.attachmentName,
+    this.attachmentContentType,
+    this.attachmentSize,
+    List<int>? mentionedUserIds,
+    List<String>? mentionedUsernames,
+  })  : mentionedUserIds =
+            List<int>.unmodifiable(mentionedUserIds ?? const <int>[]),
+        mentionedUsernames =
+            List<String>.unmodifiable(mentionedUsernames ?? const <String>[]);
 
   Message copyWith({
     String? content,
     bool? isPinned,
-    String? pinnedAt,
-    int? pinnedByUserId,
-    String? pinnedByUsername,
+    Object? pinnedAt = _unset,
+    Object? pinnedByUserId = _unset,
+    Object? pinnedByUsername = _unset,
+    Object? attachmentUrl = _unset,
+    Object? attachmentName = _unset,
+    Object? attachmentContentType = _unset,
+    Object? attachmentSize = _unset,
+    List<int>? mentionedUserIds,
+    List<String>? mentionedUsernames,
   }) {
     return Message(
       id: id,
@@ -137,13 +160,49 @@ class Message {
       parentUsername: parentUsername,
       parentContent: parentContent,
       isPinned: isPinned ?? this.isPinned,
-      pinnedAt: pinnedAt ?? this.pinnedAt,
-      pinnedByUserId: pinnedByUserId ?? this.pinnedByUserId,
-      pinnedByUsername: pinnedByUsername ?? this.pinnedByUsername,
+      pinnedAt: identical(pinnedAt, _unset) ? this.pinnedAt : pinnedAt as String?,
+      pinnedByUserId: identical(pinnedByUserId, _unset)
+          ? this.pinnedByUserId
+          : pinnedByUserId as int?,
+      pinnedByUsername: identical(pinnedByUsername, _unset)
+          ? this.pinnedByUsername
+          : pinnedByUsername as String?,
+      attachmentUrl: identical(attachmentUrl, _unset)
+          ? this.attachmentUrl
+          : attachmentUrl as String?,
+      attachmentName: identical(attachmentName, _unset)
+          ? this.attachmentName
+          : attachmentName as String?,
+      attachmentContentType: identical(attachmentContentType, _unset)
+          ? this.attachmentContentType
+          : attachmentContentType as String?,
+      attachmentSize: identical(attachmentSize, _unset)
+          ? this.attachmentSize
+          : attachmentSize as int?,
+      mentionedUserIds: mentionedUserIds ?? this.mentionedUserIds,
+      mentionedUsernames: mentionedUsernames ?? this.mentionedUsernames,
     );
   }
 
   factory Message.fromJson(Map<String, dynamic> json) {
+    final mentionedUserIds = (json['mentioned_user_ids'] as List<dynamic>? ?? [])
+        .map((value) {
+          if (value is int) {
+            return value;
+          }
+          if (value is String) {
+            return int.tryParse(value);
+          }
+          return null;
+        })
+        .whereType<int>()
+        .toList();
+    final mentionedUsernames =
+        (json['mentioned_usernames'] as List<dynamic>? ?? [])
+            .map((value) => value.toString().trim())
+            .where((value) => value.isNotEmpty)
+            .toList();
+
     return Message(
       id: json['id'],
       userId: json['user_id'],
@@ -157,6 +216,14 @@ class Message {
       pinnedAt: json['pinned_at'],
       pinnedByUserId: json['pinned_by_user_id'],
       pinnedByUsername: json['pinned_by_username'],
+      attachmentUrl: json['attachment_url']?.toString(),
+      attachmentName: json['attachment_name']?.toString(),
+      attachmentContentType: json['attachment_content_type']?.toString(),
+      attachmentSize: json['attachment_size'] is int
+          ? json['attachment_size']
+          : int.tryParse("${json['attachment_size'] ?? ''}"),
+      mentionedUserIds: mentionedUserIds,
+      mentionedUsernames: mentionedUsernames,
     );
   }
 }
