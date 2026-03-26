@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
 import 'providers/app_state.dart';
 import 'screens/login_screen.dart';
 import 'screens/main_layout.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
+
   runApp(
     ChangeNotifierProvider(
       create: (context) => AppState(),

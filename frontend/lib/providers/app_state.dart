@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:media_kit/media_kit.dart' as media_kit;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/chat_models.dart';
@@ -56,7 +57,11 @@ class AppState extends ChangeNotifier {
   final Map<int, MediaStream> _remoteStreams = {};
   final Map<int, RTCVideoRenderer> _remoteAudioRenderers = {};
   final Map<int, double> _voiceParticipantVolumes = {};
-  final AudioPlayer _musicPlayer = AudioPlayer();
+  final AudioPlayer? _musicPlayer =
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows
+      ? null
+      : AudioPlayer();
+  final media_kit.Player _windowsMusicPlayer = media_kit.Player();
   final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
   final Set<int> _remoteDescriptionReadyUsers = <int>{};
   Future<void> _voiceSignalProcessingQueue = Future.value();
@@ -108,6 +113,8 @@ class AppState extends ChangeNotifier {
   String _inputTestLevelSource = "none";
   DateTime? _inputTestLastSampleAt;
   final Map<String, String> _inputTestRawStats = {};
+  bool get _isWindowsDesktop =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
   // Interaction state
   Message? replyingTo;
@@ -1733,14 +1740,57 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    if (_isWindowsDesktop) {
+      try {
+        await _windowsMusicPlayer.stop();
+        await _windowsMusicPlayer.open(
+          media_kit.Media(streamUrl),
+          play: true,
+        );
+      } catch (error) {
+        voiceError = "Unable to start music playback: $error";
+        notifyListeners();
+      }
+      return;
+    }
+
+    final streamIsManifest =
+        payload['stream_is_manifest'] == true ||
+        _looksLikeManifestStreamUrl(streamUrl);
+    final mimeType = _resolveMusicStreamMimeType(streamUrl, streamIsManifest);
+
     try {
-      await _musicPlayer.stop();
-      await _musicPlayer.setSource(UrlSource(streamUrl));
-      await _musicPlayer.resume();
+      await _musicPlayer!.stop();
+      await _musicPlayer!.setSource(UrlSource(streamUrl, mimeType: mimeType));
+      await _musicPlayer!.resume();
     } catch (error) {
-      voiceError = "Unable to start music playback: $error";
+      if (streamIsManifest &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.windows) {
+        voiceError =
+            "Unable to play this stream on Windows. Try another track or source.";
+      } else {
+        voiceError = "Unable to start music playback: $error";
+      }
       notifyListeners();
     }
+  }
+
+  bool _looksLikeManifestStreamUrl(String url) {
+    final normalized = url.trim().toLowerCase();
+    return normalized.contains('.m3u8') || normalized.contains('.mpd');
+  }
+
+  String? _resolveMusicStreamMimeType(String streamUrl, bool isManifest) {
+    if (!isManifest) {
+      return null;
+    }
+
+    final normalized = streamUrl.toLowerCase();
+    if (normalized.contains('.mpd')) {
+      return 'application/dash+xml';
+    }
+    return 'application/vnd.apple.mpegurl';
   }
 
   Future<RTCPeerConnection> _ensurePeerConnection(int remoteUserId) async {
@@ -2130,7 +2180,11 @@ class AppState extends ChangeNotifier {
     }
     _resetVoiceDiagnostics();
     await _stopMicProbe();
-    await _musicPlayer.stop();
+    if (_isWindowsDesktop) {
+      await _windowsMusicPlayer.stop();
+    } else {
+      await _musicPlayer!.stop();
+    }
 
     if (signalChannel != null) {
       await signalChannel.sink.close();
@@ -2974,6 +3028,7 @@ class AppState extends ChangeNotifier {
         timestamp: DateTime.now().toUtc().toIso8601String(),
       ),
     );
+    notifyListeners();
   }
 
   void _applyPinStateFromMessage(Message source) {
@@ -3122,7 +3177,11 @@ class AppState extends ChangeNotifier {
     _inputTestTimer?.cancel();
     _inputTestTimer = null;
     unawaited(_stopMicProbe());
-    unawaited(_musicPlayer.dispose());
+    if (_isWindowsDesktop) {
+      unawaited(_windowsMusicPlayer.dispose());
+    } else {
+      unawaited(_musicPlayer!.dispose());
+    }
     unawaited(stopInputTest(notify: false));
 
     for (final peerConnection in _peerConnections.values) {

@@ -31,6 +31,12 @@ try:
     import yt_dlp
 except Exception:  # pragma: no cover - optional dependency at runtime
     yt_dlp = None
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyClientCredentials
+except Exception:  # pragma: no cover - optional dependency at runtime
+    spotipy = None
+    SpotifyClientCredentials = None
 from database import SessionLocal, engine, get_db
 import models, schemas
 from passlib.context import CryptContext
@@ -76,6 +82,12 @@ YTDLP_FORMAT_UNAVAILABLE_PHRASES = (
     "requested format is not available",
 )
 MANIFEST_FORMAT_HINTS = ("m3u8", "hls", "dash", "f4m", "ism")
+MANIFEST_CONTENT_TYPE_HINTS = (
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+    "application/dash+xml",
+)
 PREFERRED_AUDIO_EXT_ORDER = ("mp3", "m4a", "aac", "opus", "ogg", "webm", "wav")
 PREFERRED_AUDIO_EXT_RANK = {
     ext: rank for rank, ext in enumerate(PREFERRED_AUDIO_EXT_ORDER)
@@ -251,7 +263,7 @@ class ConnectionManager:
         if not connections:
             self.active_connections.pop(channel_id, None)
 
-    async def broadcast(self, message: str, channel_id: int):
+    async def broadcast(self, channel_id: int, message: str):
         connections = self.active_connections.get(channel_id, [])
         for connection in list(connections):
             try:
@@ -383,14 +395,61 @@ voice_manager = VoiceConnectionManager()
 
 async def _send_music_bot_notice(channel_id: int, content: str) -> None:
     await manager.broadcast(
+        channel_id,
         json.dumps(
             {
                 "type": "music_bot_notice",
                 "content": content,
             }
         ),
-        channel_id,
     )
+
+
+def _resolve_spotify_to_search_query(spotify_url: str) -> str:
+    if spotipy is None or SpotifyClientCredentials is None:
+        raise MusicExtractionError("Spotify support is unavailable on the server.")
+
+    client_id = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise MusicExtractionError(
+            "Spotify links require SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET env vars."
+        )
+
+    match = SPOTIFY_URL_PATTERN.match(spotify_url)
+    if not match:
+        raise MusicExtractionError("Unsupported Spotify URL format.")
+    track_id = match.group("id")
+    if not track_id:
+        raise MusicExtractionError("Could not parse Spotify track ID.")
+
+    try:
+        client = spotipy.Spotify(
+            auth_manager=SpotifyClientCredentials(
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+        )
+        track = client.track(track_id)
+        title = str(track.get("name") or "").strip()
+        artists = [
+            str(artist.get("name") or "").strip()
+            for artist in (track.get("artists") or [])
+            if isinstance(artist, dict)
+        ]
+        artists = [artist for artist in artists if artist]
+    except MusicExtractionError:
+        raise
+    except Exception as exc:
+        logger.warning("spotify track lookup failed url=%s error=%s", spotify_url, exc)
+        raise MusicExtractionError("Could not resolve this Spotify track.")
+
+    if not title:
+        raise MusicExtractionError("Spotify track metadata is incomplete.")
+
+    if not artists:
+        return f"ytsearch1:{title}"
+    return f"ytsearch1:{' '.join(artists)} - {title}"
 
 
 async def _handle_music_play_command(
@@ -430,7 +489,11 @@ async def _handle_music_play_command(
         )
 
     if is_spotify:
-        extraction_url = f"ytsearch1:{raw_url}"
+        try:
+            extraction_url = _resolve_spotify_to_search_query(raw_url)
+        except MusicExtractionError as exc:
+            await _send_music_bot_notice(channel_id, str(exc))
+            return
     elif not is_youtube and not is_soundcloud:
         extraction_url = f"ytsearch1:{raw_url}"
 
@@ -453,13 +516,10 @@ async def _handle_music_play_command(
         await _send_music_bot_notice(channel_id, "I couldn't load that link.")
         return
 
-    # Construct proxy URL if base_url is provided
-    # Proxying is generally safer for YouTube/SoundCloud
+    # Construct proxy URL if base_url is provided.
     final_stream_url = stream_url
     if base_url:
-        base = base_url.rstrip("/")
-        encoded_stream_url = urllib.parse.quote(stream_url, safe="")
-        final_stream_url = f"{base}/audio-proxy?url={encoded_stream_url}"
+        final_stream_url = _build_audio_proxy_url(base_url, stream_url)
 
     await voice_manager.broadcast(
         voice_channel_id,
@@ -468,6 +528,7 @@ async def _handle_music_play_command(
             "title": title,
             "source_url": raw_url,
             "stream_url": final_stream_url,
+            "stream_is_manifest": _looks_like_manifest_url(stream_url),
             "requested_by_user_id": user_id,
             "requested_by_username": username,
         },
@@ -477,6 +538,86 @@ async def _handle_music_play_command(
         channel_id,
         f"Now playing: {title}",
     )
+
+
+def _build_http_base_url_from_websocket(websocket: WebSocket) -> str | None:
+    ws_url = websocket.url
+    host = ws_url.hostname
+    if not host:
+        return None
+
+    scheme = "https" if ws_url.scheme in {"wss", "https"} else "http"
+    port = ws_url.port
+    if port is None:
+        return f"{scheme}://{host}"
+
+    default_port = 443 if scheme == "https" else 80
+    if port == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _looks_like_manifest_url(url: str) -> bool:
+    normalized = (url or "").strip().lower()
+    return ".m3u8" in normalized or ".mpd" in normalized
+
+
+def _looks_like_manifest_content_type(content_type: str | None) -> bool:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized:
+        return False
+    if normalized in MANIFEST_CONTENT_TYPE_HINTS:
+        return True
+    return "mpegurl" in normalized or "dash+xml" in normalized
+
+
+def _build_audio_proxy_url(base_url: str, target_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return target_url
+
+    parsed_target = urllib.parse.urlparse(target_url)
+    proxy_base = urllib.parse.urlparse(base)
+    if (
+        parsed_target.scheme in {"http", "https"}
+        and parsed_target.netloc == proxy_base.netloc
+        and parsed_target.path.rstrip("/") == "/audio-proxy"
+        and "url=" in parsed_target.query
+    ):
+        return target_url
+
+    encoded_target = urllib.parse.quote(target_url, safe="")
+    return f"{base}/audio-proxy?url={encoded_target}"
+
+
+def _rewrite_manifest_for_proxy(manifest_text: str, manifest_url: str, proxy_base_url: str) -> str:
+    def replace_uri_attribute(match: re.Match[str]) -> str:
+        quote_char = match.group(1)
+        uri_value = match.group(2).strip()
+        absolute_uri = urllib.parse.urljoin(manifest_url, uri_value)
+        proxied_uri = _build_audio_proxy_url(proxy_base_url, absolute_uri)
+        return f"URI={quote_char}{proxied_uri}{quote_char}"
+
+    rewritten_lines: List[str] = []
+    for raw_line in manifest_text.splitlines():
+        stripped_line = raw_line.strip()
+        if not stripped_line:
+            rewritten_lines.append(raw_line)
+            continue
+
+        if stripped_line.startswith("#"):
+            rewritten_lines.append(
+                re.sub(r"URI=(['\"])(.+?)\1", replace_uri_attribute, raw_line)
+            )
+            continue
+
+        absolute_uri = urllib.parse.urljoin(manifest_url, stripped_line)
+        rewritten_lines.append(_build_audio_proxy_url(proxy_base_url, absolute_uri))
+
+    rewritten_manifest = "\n".join(rewritten_lines)
+    if manifest_text.endswith("\n"):
+        rewritten_manifest += "\n"
+    return rewritten_manifest
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -1050,11 +1191,10 @@ _backfill_default_channel_permissions()
 
 
 def _build_ytdlp_options(
-    format_selector: str = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
+    format_selector: str | None = "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
     use_tuned_extractor: bool = False,
 ) -> Dict[str, Any]:
     options: Dict[str, Any] = {
-        "format": format_selector,
         "noplaylist": True,
         "skip_download": True,
         "quiet": True,
@@ -1064,6 +1204,10 @@ def _build_ytdlp_options(
         "socket_timeout": 30,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
+    if format_selector:
+        options["format"] = format_selector
+
+    youtube_extractor_args: Dict[str, Any] = {}
 
     if use_tuned_extractor:
         player_clients_raw = os.getenv("MUSIC_BOT_YTDLP_PLAYER_CLIENTS", "")
@@ -1076,11 +1220,19 @@ def _build_ytdlp_options(
             item.strip() for item in player_skip_raw.split(",") if item.strip()
         ] or ["webpage", "configs"]
 
+        youtube_extractor_args["player_client"] = player_clients
+        youtube_extractor_args["player_skip"] = player_skip
+
+    po_token_raw = os.getenv("MUSIC_BOT_YTDLP_PO_TOKEN", "").strip()
+    visitor_data = os.getenv("MUSIC_BOT_YTDLP_VISITOR_DATA", "").strip()
+    if po_token_raw and visitor_data:
+        po_token = po_token_raw if "+" in po_token_raw else f"web+{po_token_raw}"
+        youtube_extractor_args["po_token"] = [po_token]
+        youtube_extractor_args["visitor_data"] = [visitor_data]
+
+    if youtube_extractor_args:
         options["extractor_args"] = {
-            "youtube": {
-                "player_client": player_clients,
-                "player_skip": player_skip,
-            }
+            "youtube": youtube_extractor_args,
         }
 
     return options
@@ -1091,6 +1243,7 @@ def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
         ("audio-http-direct", _build_ytdlp_options(use_tuned_extractor=False)),
         ("audio-default", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=False)),
         ("best-default", _build_ytdlp_options("best", use_tuned_extractor=False)),
+        ("auto-default", _build_ytdlp_options(None, use_tuned_extractor=False)),
     ]
 
     tune_enabled_value = os.getenv("MUSIC_BOT_YTDLP_ENABLE_TUNED_EXTRACTOR", "1").strip().lower()
@@ -1101,10 +1254,37 @@ def _build_ytdlp_strategy_options() -> List[tuple[str, Dict[str, Any]]]:
                 ("audio-http-direct-tuned", _build_ytdlp_options(use_tuned_extractor=True)),
                 ("audio-tuned", _build_ytdlp_options("bestaudio/best", use_tuned_extractor=True)),
                 ("best-tuned", _build_ytdlp_options("best", use_tuned_extractor=True)),
+                ("auto-tuned", _build_ytdlp_options(None, use_tuned_extractor=True)),
             ]
         )
 
     return strategies
+
+
+def _decode_ytdlp_cookies_b64(cookies_b64: str) -> str:
+    # Accept values copied with line wraps and values missing trailing "=" padding.
+    normalized = re.sub(r"\s+", "", cookies_b64)
+
+    lowered = normalized.lower()
+    if lowered.startswith("data:") and ";base64," in lowered:
+        _, _, normalized = normalized.partition(",")
+
+    if not normalized:
+        raise ValueError("Empty base64 value")
+
+    padded = normalized + ("=" * (-len(normalized) % 4))
+    decode_errors: list[str] = []
+
+    for decode_name, decoder in (
+        ("base64", base64.b64decode),
+        ("urlsafe-base64", base64.urlsafe_b64decode),
+    ):
+        try:
+            return decoder(padded).decode("utf-8")
+        except Exception as exc:
+            decode_errors.append(f"{decode_name}: {exc}")
+
+    raise ValueError("; ".join(decode_errors))
 
 
 def _resolve_ytdlp_cookie_file() -> str | None:
@@ -1123,9 +1303,9 @@ def _resolve_ytdlp_cookie_file() -> str | None:
 
     if cookies_b64:
         try:
-            resolved_content = base64.b64decode(cookies_b64).decode("utf-8")
-        except Exception:
-            logger.exception("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value")
+            resolved_content = _decode_ytdlp_cookies_b64(cookies_b64)
+        except Exception as exc:
+            logger.warning("Invalid MUSIC_BOT_YTDLP_COOKIES_B64 value: %s", exc)
             return None
     elif cookies_text.strip():
         resolved_content = cookies_text.replace("\\n", "\n")
@@ -1378,10 +1558,26 @@ def _extract_youtube_stream(url: str, format_override: str | None = None) -> tup
             _resolve_ytdlp_cookie_file()
             or os.getenv("MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER", "").strip()
         )
+        configured_po_token_source = bool(
+            os.getenv("MUSIC_BOT_YTDLP_PO_TOKEN", "").strip()
+            and os.getenv("MUSIC_BOT_YTDLP_VISITOR_DATA", "").strip()
+        )
         if configured_cookie_source and not saw_authenticated_bot_check_error and saw_format_unavailable_error:
             raise MusicExtractionError(
                 "Your YouTube cookies were used, but yt-dlp could not resolve a playable format. "
                 "Export fresh cookies, set MUSIC_BOT_YTDLP_COOKIES_B64 again, and restart backend."
+            )
+        if configured_po_token_source and configured_cookie_source:
+            raise MusicExtractionError(
+                "YouTube blocked playback even with your cookie and PO token settings. "
+                "Regenerate MUSIC_BOT_YTDLP_PO_TOKEN / MUSIC_BOT_YTDLP_VISITOR_DATA "
+                "and refresh cookies, then restart backend."
+            )
+        if configured_po_token_source:
+            raise MusicExtractionError(
+                "YouTube blocked playback even with your PO token settings. "
+                "Regenerate MUSIC_BOT_YTDLP_PO_TOKEN and MUSIC_BOT_YTDLP_VISITOR_DATA, "
+                "then restart backend."
             )
         if configured_cookie_source:
             raise MusicExtractionError(
@@ -1390,7 +1586,9 @@ def _extract_youtube_stream(url: str, format_override: str | None = None) -> tup
             )
 
         raise MusicExtractionError(
-            "YouTube asked for bot verification. Configure MUSIC_BOT_YTDLP_COOKIES_B64 "
+            "YouTube asked for bot verification. Configure PO token auth via "
+            "MUSIC_BOT_YTDLP_PO_TOKEN + MUSIC_BOT_YTDLP_VISITOR_DATA (recommended), "
+            "or configure cookies with MUSIC_BOT_YTDLP_COOKIES_B64 "
             "(or MUSIC_BOT_YTDLP_COOKIES_FILE / MUSIC_BOT_YTDLP_COOKIES_FROM_BROWSER) "
             "and restart backend."
         )
@@ -2014,6 +2212,7 @@ async def pin_message(
     db.refresh(target_message)
 
     await manager.broadcast(
+        channel_id,
         json.dumps(
             {
                 "type": "pin_message",
@@ -2024,7 +2223,6 @@ async def pin_message(
                 "pinned_by_username": target_message.pinned_by_username,
             }
         ),
-        channel_id,
     )
 
     return target_message
@@ -2062,13 +2260,13 @@ async def unpin_message(
         db.commit()
 
     await manager.broadcast(
+        channel_id,
         json.dumps(
             {
                 "type": "unpin_message",
                 "id": target_message.id,
             }
         ),
-        channel_id,
     )
 
     return {"detail": "Message unpinned"}
@@ -2202,63 +2400,123 @@ def list_voice_channel_participants(voice_channel_id: int):
 
 
 @app.get("/audio-proxy")
-async def audio_proxy(url: str):
+async def audio_proxy(request: Request, url: str):
     # Decode the URL if it's double-encoded
-    target_url = urllib.parse.unquote(url)
+    target_url = urllib.parse.unquote(url).strip()
+    parsed_target_url = urllib.parse.urlparse(target_url)
+    if parsed_target_url.scheme not in {"http", "https"} or not parsed_target_url.netloc:
+        raise HTTPException(status_code=400, detail="Invalid audio target URL")
+
+    target_host = (parsed_target_url.hostname or "").lower()
+    referer = "https://www.youtube.com/"
+    origin = "https://www.youtube.com"
+    if "soundcloud" in target_host:
+        referer = "https://soundcloud.com/"
+        origin = "https://soundcloud.com"
+
+    is_manifest_target = _looks_like_manifest_url(target_url)
     forwarded_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "audio/*,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": (
+            "application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8"
+            if is_manifest_target
+            else "audio/*,*/*;q=0.8"
+        ),
+        "Referer": referer,
+        "Origin": origin,
     }
 
-    async with httpx.AsyncClient() as client:
-        try:
-            probe_headers = dict(forwarded_headers)
-            content_type = "audio/mpeg"
-            response_headers: Dict[str, str] = {"Accept-Ranges": "bytes"}
+    request_range = request.headers.get("range")
+    if request_range and not is_manifest_target:
+        forwarded_headers["Range"] = request_range
 
-            # Probe metadata without downloading audio body.
-            try:
-                probe = await client.head(
+    client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+    upstream_response: httpx.Response | None = None
+    try:
+        request_obj = client.build_request("GET", target_url, headers=forwarded_headers)
+        upstream_response = await client.send(request_obj, stream=True)
+        status_code = upstream_response.status_code
+
+        if status_code >= 400:
+            body_preview = await upstream_response.aread()
+            await upstream_response.aclose()
+            upstream_response = None
+            await client.aclose()
+            detail_suffix = ""
+            if body_preview:
+                snippet = body_preview[:200].decode("utf-8", errors="ignore").strip()
+                if snippet:
+                    detail_suffix = f": {snippet}"
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"Upstream audio request failed with {status_code}{detail_suffix}",
+            )
+
+        content_type = upstream_response.headers.get("Content-Type", "audio/mpeg")
+        looks_like_manifest = is_manifest_target or _looks_like_manifest_content_type(content_type)
+
+        response_headers: Dict[str, str] = {
+            "Accept-Ranges": upstream_response.headers.get("Accept-Ranges", "bytes"),
+        }
+        for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
+            header_value = upstream_response.headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
+
+        if looks_like_manifest:
+            manifest_bytes = await upstream_response.aread()
+            await upstream_response.aclose()
+            upstream_response = None
+            await client.aclose()
+
+            manifest_text = manifest_bytes.decode("utf-8", errors="replace")
+            if manifest_text.lstrip().startswith("#EXTM3U"):
+                proxy_base_url = str(request.base_url).rstrip("/")
+                rewritten_manifest = _rewrite_manifest_for_proxy(
+                    manifest_text,
                     target_url,
-                    headers=probe_headers,
-                    follow_redirects=True,
-                    timeout=10.0,
+                    proxy_base_url,
                 )
-                if 200 <= probe.status_code < 400:
-                    content_type = probe.headers.get("Content-Type", content_type)
-                    response_headers["Accept-Ranges"] = probe.headers.get("Accept-Ranges", "bytes")
-                    for header_name in ("Content-Length", "Content-Range", "Cache-Control", "ETag", "Last-Modified"):
-                        header_value = probe.headers.get(header_name)
-                        if header_value:
-                            response_headers[header_name] = header_value
-                else:
-                    logger.warning(
-                        "Audio proxy HEAD probe failed status=%s url=%s",
-                        probe.status_code,
-                        target_url,
-                    )
-            except Exception as probe_exc:
-                logger.warning("Audio proxy HEAD probe failed url=%s error=%s", target_url, probe_exc)
+                manifest_headers = dict(response_headers)
+                manifest_headers.pop("Content-Length", None)
+                manifest_headers.pop("Content-Range", None)
+                return Response(
+                    content=rewritten_manifest,
+                    media_type="application/vnd.apple.mpegurl",
+                    headers=manifest_headers,
+                    status_code=status_code,
+                )
 
-            async def stream_audio():
-                async with client.stream(
-                    "GET",
-                    target_url,
-                    headers=forwarded_headers,
-                    follow_redirects=True,
-                    timeout=30.0,
-                ) as resp:
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
-
-            return StreamingResponse(
-                stream_audio(),
+            return Response(
+                content=manifest_bytes,
                 media_type=content_type,
                 headers=response_headers,
+                status_code=status_code,
             )
-        except Exception as e:
-            logger.error(f"Proxy error: {e}")
-            raise HTTPException(status_code=500, detail="Could not proxy audio")
+
+        async def stream_audio():
+            assert upstream_response is not None
+            try:
+                async for chunk in upstream_response.aiter_bytes(chunk_size=65536):
+                    yield chunk
+            finally:
+                await upstream_response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_audio(),
+            media_type=content_type,
+            headers=response_headers,
+            status_code=status_code,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Proxy error url=%s error=%s", target_url, e)
+        if upstream_response is not None:
+            await upstream_response.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=500, detail="Could not proxy audio")
 
 
 # --- WEBSOCKET ENDPOINTS ---
@@ -2383,9 +2641,9 @@ async def websocket_endpoint(
                 else:
                     continue
 
-                await manager.broadcast(broadcast_msg, channel_id)
+                await manager.broadcast(channel_id, broadcast_msg)
                 if msg_type == "new_message":
-                    base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+                    base_url = _build_http_base_url_from_websocket(websocket)
                     await _handle_music_play_command(
                         channel_id=channel_id,
                         user_id=user_id,
@@ -2409,8 +2667,8 @@ async def websocket_endpoint(
                 broadcast_msg = json.dumps(
                     _serialize_message_payload(db_message, "new_message")
                 )
-                await manager.broadcast(broadcast_msg, channel_id)
-                base_url = str(websocket.url.replace(path="", scheme="https" if websocket.url.is_secure else "http"))
+                await manager.broadcast(channel_id, broadcast_msg)
+                base_url = _build_http_base_url_from_websocket(websocket)
                 await _handle_music_play_command(
                     channel_id=channel_id,
                     user_id=user_id,

@@ -8,6 +8,7 @@
 
 #include <audioplayers_windows/audioplayers_windows_plugin.h>
 #include <flutter_webrtc/flutter_web_r_t_c_plugin.h>
+#include <media_kit_libs_windows_audio/media_kit_libs_windows_audio_plugin_c_api.h>
 #include <url_launcher_windows/url_launcher_windows.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
@@ -15,6 +16,8 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("AudioplayersWindowsPlugin"));
   FlutterWebRTCPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FlutterWebRTCPlugin"));
+  MediaKitLibsWindowsAudioPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("MediaKitLibsWindowsAudioPluginCApi"));
   UrlLauncherWindowsRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("UrlLauncherWindows"));
 }
