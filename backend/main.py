@@ -312,7 +312,7 @@ class VoiceConnectionManager:
         self.mute_states: Dict[int, Dict[int, bool]] = {}
         # channel_id -> whether the synthetic music bot participant is present
         self.music_bot_presence: Dict[int, bool] = {}
-        # channel_id -> bot volume (0.0 to 1.0)
+        # channel_id -> bot volume (0.0 to 5.0)
         self.music_bot_volumes: Dict[int, float] = {}
 
     async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
@@ -409,7 +409,7 @@ class VoiceConnectionManager:
         return self.music_bot_presence.get(channel_id, False)
 
     def set_music_bot_volume(self, channel_id: int, volume: float) -> float:
-        normalized_volume = max(0.0, min(1.0, float(volume)))
+        normalized_volume = max(0.0, min(5.0, float(volume)))
         self.music_bot_volumes[channel_id] = normalized_volume
         return normalized_volume
 
@@ -453,8 +453,67 @@ class VoiceConnectionManager:
                 pass
 
 
+class MusicPlaybackStateManager:
+    def __init__(self):
+        # channel_id -> currently playing track payload
+        self.current_tracks: Dict[int, Dict[str, Any]] = {}
+        # channel_id -> queued track payloads
+        self.queued_tracks: Dict[int, List[Dict[str, Any]]] = {}
+        self._next_track_id = 1
+
+    def _allocate_track_id(self) -> int:
+        track_id = self._next_track_id
+        self._next_track_id += 1
+        return track_id
+
+    def enqueue_track(
+        self,
+        channel_id: int,
+        track_payload: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any], int]:
+        normalized_payload = dict(track_payload)
+        normalized_payload["track_id"] = self._allocate_track_id()
+
+        current_track = self.current_tracks.get(channel_id)
+        if current_track is None:
+            self.current_tracks[channel_id] = normalized_payload
+            return True, normalized_payload, 0
+
+        queue = self.queued_tracks.setdefault(channel_id, [])
+        queue.append(normalized_payload)
+        return False, normalized_payload, len(queue)
+
+    def complete_track(
+        self,
+        channel_id: int,
+        track_id: int,
+    ) -> Dict[str, Any] | None:
+        current_track = self.current_tracks.get(channel_id)
+        if current_track is None:
+            return None
+        if current_track.get("track_id") != track_id:
+            return None
+
+        queue = self.queued_tracks.get(channel_id, [])
+        if queue:
+            next_track = queue.pop(0)
+            self.current_tracks[channel_id] = next_track
+            if not queue:
+                self.queued_tracks.pop(channel_id, None)
+            return next_track
+
+        self.current_tracks.pop(channel_id, None)
+        self.queued_tracks.pop(channel_id, None)
+        return None
+
+    def clear_channel(self, channel_id: int) -> None:
+        self.current_tracks.pop(channel_id, None)
+        self.queued_tracks.pop(channel_id, None)
+
+
 manager = ConnectionManager()
 voice_manager = VoiceConnectionManager()
+music_playback_manager = MusicPlaybackStateManager()
 
 
 async def _send_music_bot_notice(channel_id: int, content: str) -> None:
@@ -502,6 +561,40 @@ async def _broadcast_music_bot_volume(voice_channel_id: int, volume: float) -> N
             "volume": volume,
         },
     )
+
+
+async def _broadcast_music_playback_start(
+    voice_channel_id: int,
+    track_payload: Dict[str, Any],
+) -> None:
+    payload = dict(track_payload)
+    payload.pop("notice_channel_id", None)
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "music_play",
+            **payload,
+        },
+    )
+
+
+async def _advance_music_queue_after_completion(
+    voice_channel_id: int,
+    track_id: int,
+) -> None:
+    next_track = music_playback_manager.complete_track(voice_channel_id, track_id)
+    if next_track is None:
+        return
+
+    await _broadcast_music_playback_start(voice_channel_id, next_track)
+
+    notice_channel_id = next_track.get("notice_channel_id")
+    title = str(next_track.get("title") or "").strip()
+    if isinstance(notice_channel_id, int) and title:
+        await _send_music_bot_notice(
+            notice_channel_id,
+            f"Now playing: {title}",
+        )
 
 
 def _resolve_spotify_to_search_query(spotify_url: str) -> str:
@@ -593,7 +686,7 @@ async def _handle_music_volume_command(
     if voice_channel_id is None:
         await _send_music_bot_notice(
             channel_id,
-            "Join a voice channel first, then use volume <0-100>.",
+            "Join a voice channel first, then use volume <0-500>.",
         )
         return
 
@@ -612,11 +705,11 @@ async def _handle_music_volume_command(
     try:
         parsed_percent = float(raw_value)
     except ValueError:
-        await _send_music_bot_notice(channel_id, "Usage: volume <0-100>")
+        await _send_music_bot_notice(channel_id, "Usage: volume <0-500>")
         return
 
-    if parsed_percent < 0 or parsed_percent > 100:
-        await _send_music_bot_notice(channel_id, "Volume must be between 0 and 100.")
+    if parsed_percent < 0 or parsed_percent > 500:
+        await _send_music_bot_notice(channel_id, "Volume must be between 0 and 500.")
         return
 
     await _ensure_music_bot_joined_in_channel(voice_channel_id)
@@ -705,10 +798,9 @@ async def _handle_music_play_command(
     if base_url:
         final_stream_url = _build_audio_proxy_url(base_url, stream_url)
 
-    await voice_manager.broadcast(
+    should_start_now, track_payload, queue_position = music_playback_manager.enqueue_track(
         voice_channel_id,
         {
-            "type": "music_play",
             "title": title,
             "source_url": raw_url,
             "stream_url": final_stream_url,
@@ -716,13 +808,21 @@ async def _handle_music_play_command(
             "volume": current_music_bot_volume,
             "requested_by_user_id": user_id,
             "requested_by_username": username,
+            "notice_channel_id": channel_id,
         },
     )
 
-    await _send_music_bot_notice(
-        channel_id,
-        f"Now playing: {title}",
-    )
+    if should_start_now:
+        await _broadcast_music_playback_start(voice_channel_id, track_payload)
+        await _send_music_bot_notice(
+            channel_id,
+            f"Now playing: {title}",
+        )
+    else:
+        await _send_music_bot_notice(
+            channel_id,
+            f"Queued #{queue_position}: {title}",
+        )
 
 
 async def _handle_music_bot_command(
@@ -2624,6 +2724,7 @@ async def delete_voice_channel(
         )
 
     await voice_manager.close_channel(voice_channel_id)
+    music_playback_manager.clear_channel(voice_channel_id)
     db.query(models.VoiceChannelPermission).filter(
         models.VoiceChannelPermission.channel_id == voice_channel_id
     ).delete(synchronize_session=False)
@@ -3037,6 +3138,14 @@ async def voice_websocket_endpoint(
                     },
                 )
 
+            elif msg_type == "music_track_ended":
+                raw_track_id = data_json.get("track_id")
+                try:
+                    track_id = int(raw_track_id)
+                except (TypeError, ValueError):
+                    continue
+                await _advance_music_queue_after_completion(voice_channel_id, track_id)
+
             elif msg_type == "ping":
                 pong_payload: Dict[str, Any] = {"type": "pong"}
                 ping_id = data_json.get("ping_id")
@@ -3080,6 +3189,7 @@ async def voice_websocket_endpoint(
                             "user_id": MUSIC_BOT_USER_ID,
                         },
                     )
+                music_playback_manager.clear_channel(voice_channel_id)
 
 
 if __name__ == "__main__":

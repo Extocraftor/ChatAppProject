@@ -321,8 +321,7 @@ class _SidebarState extends State<Sidebar> {
   ) {
     final isMusicBot = participant.isBot;
     final volume = state.voiceParticipantVolumeFor(participant.userId);
-    final sliderMax = isMusicBot ? 1.0 : 2.0;
-    final sliderVolume = min(volume, sliderMax);
+    final sliderVolume = min(volume, 2.0);
     final isCurrentUser = participant.userId == state.currentUser?.id;
     final userLabel = isMusicBot
         ? participant.username
@@ -403,8 +402,8 @@ class _SidebarState extends State<Sidebar> {
                   child: Slider(
                     value: sliderVolume,
                     min: 0,
-                    max: sliderMax,
-                    divisions: isMusicBot ? 20 : 40,
+                    max: 2,
+                    divisions: 40,
                     onChanged: (next) =>
                         state.setVoiceParticipantVolume(participant.userId, next),
                   ),
@@ -441,9 +440,8 @@ class _SidebarState extends State<Sidebar> {
                 onFieldSubmitted: (text) {
                   final parsed = double.tryParse(text);
                   if (parsed != null) {
-                    final maxVolume = isMusicBot ? 1.0 : 5.0;
                     state.setVoiceParticipantVolume(
-                        participant.userId, (parsed / 100).clamp(0.0, maxVolume));
+                        participant.userId, (parsed / 100).clamp(0.0, 5.0));
                   }
                 },
               ),

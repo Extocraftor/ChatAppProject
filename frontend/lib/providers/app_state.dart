@@ -63,6 +63,10 @@ class AppState extends ChangeNotifier {
       ? null
       : AudioPlayer();
   final media_kit.Player _windowsMusicPlayer = media_kit.Player();
+  StreamSubscription<void>? _musicPlayerCompletionSubscription;
+  StreamSubscription<bool>? _windowsMusicCompletedSubscription;
+  int? _activeMusicTrackId;
+  bool _suppressMusicCompletionSignals = false;
   final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
   final Set<int> _remoteDescriptionReadyUsers = <int>{};
   Future<void> _voiceSignalProcessingQueue = Future.value();
@@ -114,6 +118,24 @@ class AppState extends ChangeNotifier {
   String _inputTestLevelSource = "none";
   DateTime? _inputTestLastSampleAt;
   final Map<String, String> _inputTestRawStats = {};
+
+  AppState() {
+    if (_isWindowsDesktop) {
+      _windowsMusicCompletedSubscription =
+          _windowsMusicPlayer.stream.completed.listen((completed) {
+        if (completed) {
+          _handleMusicTrackCompleted();
+        }
+      });
+    } else {
+      _musicPlayerCompletionSubscription = _musicPlayer!.onPlayerComplete.listen((
+        _,
+      ) {
+        _handleMusicTrackCompleted();
+      });
+    }
+  }
+
   bool get _isWindowsDesktop =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
@@ -249,20 +271,14 @@ class AppState extends ChangeNotifier {
 
   bool _isMusicBotParticipantId(int userId) => userId == _musicBotUserId;
 
-  double _maxVolumeForParticipant(int userId) {
-    return _isMusicBotParticipantId(userId) ? 1.0 : 5.0;
-  }
-
   double voiceParticipantVolumeFor(int userId) {
-    final maxVolume = _maxVolumeForParticipant(userId);
     return (_voiceParticipantVolumes[userId] ?? 1.0)
-        .clamp(0.0, maxVolume)
+        .clamp(0.0, 5.0)
         .toDouble();
   }
 
   void setVoiceParticipantVolume(int userId, double volume) {
-    final maxVolume = _maxVolumeForParticipant(userId);
-    final normalized = volume.clamp(0.0, maxVolume).toDouble();
+    final normalized = volume.clamp(0.0, 5.0).toDouble();
     final previous = voiceParticipantVolumeFor(userId);
     if ((previous - normalized).abs() < 0.001) {
       return;
@@ -1759,13 +1775,10 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return;
     }
-
-    final payloadVolume = _tryParseNormalizedMusicVolume(payload['volume']);
-    if (payloadVolume != null) {
-      setVoiceParticipantVolume(_musicBotUserId, payloadVolume);
-    }
+    final trackId = _tryParseMusicTrackId(payload['track_id']);
     final playbackVolume = voiceParticipantVolumeFor(_musicBotUserId);
 
+    _suppressMusicCompletionSignals = true;
     if (_isWindowsDesktop) {
       try {
         await _windowsMusicPlayer.stop();
@@ -1774,14 +1787,18 @@ class AppState extends ChangeNotifier {
           play: true,
         );
         await _applyMusicPlaybackVolume(playbackVolume);
+        _activeMusicTrackId = trackId;
         voiceError = null;
         notifyListeners();
       } catch (error) {
         debugPrint(
           'music playback failed (windows media_kit): streamUrl=$streamUrl error=$error',
         );
+        _activeMusicTrackId = null;
         voiceError = "Unable to start music playback: $error";
         notifyListeners();
+      } finally {
+        _suppressMusicCompletionSignals = false;
       }
       return;
     }
@@ -1796,12 +1813,14 @@ class AppState extends ChangeNotifier {
       await _musicPlayer!.setSource(UrlSource(streamUrl, mimeType: mimeType));
       await _applyMusicPlaybackVolume(playbackVolume);
       await _musicPlayer!.resume();
+      _activeMusicTrackId = trackId;
       voiceError = null;
       notifyListeners();
     } catch (error) {
       debugPrint(
         'music playback failed: streamUrl=$streamUrl streamIsManifest=$streamIsManifest mimeType=$mimeType error=$error',
       );
+      _activeMusicTrackId = null;
       if (streamIsManifest &&
           !kIsWeb &&
           defaultTargetPlatform == TargetPlatform.windows) {
@@ -1811,12 +1830,14 @@ class AppState extends ChangeNotifier {
         voiceError = "Unable to start music playback: $error";
       }
       notifyListeners();
+    } finally {
+      _suppressMusicCompletionSignals = false;
     }
   }
 
   Future<void> _handleMusicVolumeSignal(Map<String, dynamic> payload) async {
     final userId = payload['user_id'];
-    final normalizedVolume = _tryParseNormalizedMusicVolume(payload['volume']);
+    final normalizedVolume = _tryParseMusicVolume(payload['volume']);
     if (userId is! int || normalizedVolume == null) {
       return;
     }
@@ -1824,27 +1845,54 @@ class AppState extends ChangeNotifier {
     setVoiceParticipantVolume(userId, normalizedVolume);
   }
 
-  double? _tryParseNormalizedMusicVolume(dynamic rawVolume) {
+  int? _tryParseMusicTrackId(dynamic rawTrackId) {
+    if (rawTrackId is int) {
+      return rawTrackId;
+    }
+    if (rawTrackId is String) {
+      return int.tryParse(rawTrackId.trim());
+    }
+    return null;
+  }
+
+  double? _tryParseMusicVolume(dynamic rawVolume) {
     if (rawVolume is num) {
-      return rawVolume.toDouble().clamp(0.0, 1.0).toDouble();
+      return rawVolume.toDouble().clamp(0.0, 5.0).toDouble();
     }
     if (rawVolume is String) {
       final parsed = double.tryParse(rawVolume.trim());
       if (parsed == null) {
         return null;
       }
-      return parsed.clamp(0.0, 1.0).toDouble();
+      return parsed.clamp(0.0, 5.0).toDouble();
     }
     return null;
   }
 
+  void _handleMusicTrackCompleted() {
+    if (_suppressMusicCompletionSignals) {
+      return;
+    }
+
+    final trackId = _activeMusicTrackId;
+    if (trackId == null) {
+      return;
+    }
+
+    _activeMusicTrackId = null;
+    _sendVoiceSignal({
+      'type': 'music_track_ended',
+      'track_id': trackId,
+    });
+  }
+
   Future<void> _applyMusicPlaybackVolume(double volume) async {
-    final normalized = volume.clamp(0.0, 1.0).toDouble();
+    final normalized = volume.clamp(0.0, 5.0).toDouble();
     try {
       if (_isWindowsDesktop) {
         await _windowsMusicPlayer.setVolume(normalized * 100.0);
       } else {
-        await _musicPlayer!.setVolume(normalized);
+        await _musicPlayer!.setVolume(normalized.clamp(0.0, 1.0).toDouble());
       }
     } catch (_) {
       // Ignore volume errors on platforms/backends that don't expose gain control.
@@ -2255,11 +2303,14 @@ class AppState extends ChangeNotifier {
     }
     _resetVoiceDiagnostics();
     await _stopMicProbe();
+    _activeMusicTrackId = null;
+    _suppressMusicCompletionSignals = true;
     if (_isWindowsDesktop) {
       await _windowsMusicPlayer.stop();
     } else {
       await _musicPlayer!.stop();
     }
+    _suppressMusicCompletionSignals = false;
 
     if (signalChannel != null) {
       await signalChannel.sink.close();
@@ -3245,6 +3296,12 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _channel?.sink.close();
     _voiceSignalChannel?.sink.close();
+    unawaited(_musicPlayerCompletionSubscription?.cancel() ?? Future.value());
+    unawaited(_windowsMusicCompletedSubscription?.cancel() ?? Future.value());
+    _musicPlayerCompletionSubscription = null;
+    _windowsMusicCompletedSubscription = null;
+    _activeMusicTrackId = null;
+    _suppressMusicCompletionSignals = true;
     _voicePingTimer?.cancel();
     _voicePingTimer = null;
     _voiceDiagnosticsTimer?.cancel();
