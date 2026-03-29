@@ -19,9 +19,10 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
@@ -71,6 +72,19 @@ SPOTIFY_URL_PATTERN = re.compile(
 SOUNDCLOUD_URL_PATTERN = re.compile(
     r"^(https?://)?((www|m|on)\.)?(soundcloud\.com|snd\.sc)/.+$",
     re.IGNORECASE,
+)
+YOUTUBE_HEADER_HOST_SUFFIXES = (
+    "youtube.com",
+    "youtube-nocookie.com",
+    "youtu.be",
+    "googlevideo.com",
+    "ytimg.com",
+)
+SOUNDCLOUD_HEADER_HOST_SUFFIXES = (
+    "soundcloud.com",
+    "snd.sc",
+    "sndcdn.com",
+    "sndcdn.net",
 )
 AUTO_COOKIE_BROWSERS = ("edge", "chrome", "brave", "firefox")
 YTDLP_BOT_CHECK_PHRASES = (
@@ -618,6 +632,36 @@ def _rewrite_manifest_for_proxy(manifest_text: str, manifest_url: str, proxy_bas
     if manifest_text.endswith("\n"):
         rewritten_manifest += "\n"
     return rewritten_manifest
+
+
+def _host_matches_suffix(host: str, suffixes: tuple[str, ...]) -> bool:
+    normalized = (host or "").strip().lower()
+    if not normalized:
+        return False
+    for suffix in suffixes:
+        if normalized == suffix or normalized.endswith(f".{suffix}"):
+            return True
+    return False
+
+
+def _resolve_audio_proxy_provider_headers(target_host: str) -> tuple[str, Dict[str, str]]:
+    if _host_matches_suffix(target_host, SOUNDCLOUD_HEADER_HOST_SUFFIXES):
+        return (
+            "soundcloud",
+            {
+                "Referer": "https://soundcloud.com/",
+                "Origin": "https://soundcloud.com",
+            },
+        )
+    if _host_matches_suffix(target_host, YOUTUBE_HEADER_HOST_SUFFIXES):
+        return (
+            "youtube",
+            {
+                "Referer": "https://www.youtube.com/",
+                "Origin": "https://www.youtube.com",
+            },
+        )
+    return "generic", {}
 
 
 def _resolve_user_role(username: str, db: Session) -> str:
@@ -2408,11 +2452,7 @@ async def audio_proxy(request: Request, url: str):
         raise HTTPException(status_code=400, detail="Invalid audio target URL")
 
     target_host = (parsed_target_url.hostname or "").lower()
-    referer = "https://www.youtube.com/"
-    origin = "https://www.youtube.com"
-    if "soundcloud" in target_host:
-        referer = "https://soundcloud.com/"
-        origin = "https://soundcloud.com"
+    provider_name, provider_headers = _resolve_audio_proxy_provider_headers(target_host)
 
     is_manifest_target = _looks_like_manifest_url(target_url)
     forwarded_headers = {
@@ -2422,9 +2462,8 @@ async def audio_proxy(request: Request, url: str):
             if is_manifest_target
             else "audio/*,*/*;q=0.8"
         ),
-        "Referer": referer,
-        "Origin": origin,
     }
+    forwarded_headers.update(provider_headers)
 
     request_range = request.headers.get("range")
     if request_range and not is_manifest_target:
@@ -2447,6 +2486,14 @@ async def audio_proxy(request: Request, url: str):
                 snippet = body_preview[:200].decode("utf-8", errors="ignore").strip()
                 if snippet:
                     detail_suffix = f": {snippet}"
+            logger.warning(
+                "audio proxy upstream failed provider=%s host=%s status=%s manifest=%s url=%s",
+                provider_name,
+                target_host,
+                status_code,
+                is_manifest_target,
+                target_url,
+            )
             raise HTTPException(
                 status_code=status_code,
                 detail=f"Upstream audio request failed with {status_code}{detail_suffix}",
@@ -2512,7 +2559,13 @@ async def audio_proxy(request: Request, url: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Proxy error url=%s error=%s", target_url, e)
+        logger.error(
+            "Proxy error provider=%s host=%s url=%s error=%s",
+            provider_name,
+            target_host,
+            target_url,
+            e,
+        )
         if upstream_response is not None:
             await upstream_response.aclose()
         await client.aclose()

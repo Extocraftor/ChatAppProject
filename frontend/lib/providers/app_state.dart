@@ -1727,8 +1727,10 @@ class AppState extends ChangeNotifier {
         _handleVoicePong(payload);
         return;
       }
-    } catch (_) {
-      // Ignore malformed signaling payloads.
+    } catch (error, stackTrace) {
+      debugPrint('voice signal handler failed: $error');
+      debugPrint('voice signal payload: $data');
+      debugPrintStack(stackTrace: stackTrace);
     }
   }
 
@@ -1747,7 +1749,12 @@ class AppState extends ChangeNotifier {
           media_kit.Media(streamUrl),
           play: true,
         );
+        voiceError = null;
+        notifyListeners();
       } catch (error) {
+        debugPrint(
+          'music playback failed (windows media_kit): streamUrl=$streamUrl error=$error',
+        );
         voiceError = "Unable to start music playback: $error";
         notifyListeners();
       }
@@ -1763,7 +1770,12 @@ class AppState extends ChangeNotifier {
       await _musicPlayer!.stop();
       await _musicPlayer!.setSource(UrlSource(streamUrl, mimeType: mimeType));
       await _musicPlayer!.resume();
+      voiceError = null;
+      notifyListeners();
     } catch (error) {
+      debugPrint(
+        'music playback failed: streamUrl=$streamUrl streamIsManifest=$streamIsManifest mimeType=$mimeType error=$error',
+      );
       if (streamIsManifest &&
           !kIsWeb &&
           defaultTargetPlatform == TargetPlatform.windows) {
