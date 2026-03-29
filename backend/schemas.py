@@ -72,6 +72,7 @@ class VoiceParticipantSchema(BaseModel):
     user_id: int
     username: str
     is_muted: bool = False
+    is_bot: bool = False
 
 
 class UserBase(BaseModel):

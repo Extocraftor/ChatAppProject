@@ -59,6 +59,13 @@ ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
 PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
+JOIN_COMMAND_PATTERN = re.compile(r"^join(?:\s+bot)?$", re.IGNORECASE)
+VOLUME_COMMAND_PATTERN = re.compile(
+    r"^volume(?:\s+(?P<value>[0-9]+(?:\.[0-9]+)?%?))?$",
+    re.IGNORECASE,
+)
+MUSIC_BOT_USER_ID = -1
+MUSIC_BOT_USERNAME = "Music Bot"
 MENTION_PATTERN = re.compile(r"(?<!\w)@([A-Za-z0-9_.-]{1,32})")
 MENTION_TRAILING_CHARS = ".,!?;:)]}"
 YOUTUBE_URL_PATTERN = re.compile(
@@ -303,6 +310,10 @@ class VoiceConnectionManager:
         self.usernames: Dict[int, Dict[int, str]] = {}
         # channel_id -> user_id -> muted state
         self.mute_states: Dict[int, Dict[int, bool]] = {}
+        # channel_id -> whether the synthetic music bot participant is present
+        self.music_bot_presence: Dict[int, bool] = {}
+        # channel_id -> bot volume (0.0 to 1.0)
+        self.music_bot_volumes: Dict[int, float] = {}
 
     async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
         await websocket.accept()
@@ -354,19 +365,56 @@ class VoiceConnectionManager:
     def participants(self, channel_id: int) -> List[Dict[str, Any]]:
         usernames = self.usernames.get(channel_id, {})
         mute_states = self.mute_states.get(channel_id, {})
-        return [
+        participants = [
             {
                 "user_id": user_id,
                 "username": usernames.get(user_id, f"User #{user_id}"),
                 "is_muted": mute_states.get(user_id, False),
+                "is_bot": False,
             }
             for user_id in usernames.keys()
         ]
+        if self.music_bot_presence.get(channel_id, False):
+            participants.append(
+                {
+                    "user_id": MUSIC_BOT_USER_ID,
+                    "username": MUSIC_BOT_USERNAME,
+                    "is_muted": False,
+                    "is_bot": True,
+                }
+            )
+        return participants
 
     def update_mute_state(self, channel_id: int, user_id: int, is_muted: bool):
         if channel_id not in self.mute_states:
             self.mute_states[channel_id] = {}
         self.mute_states[channel_id][user_id] = is_muted
+
+    def has_real_participants(self, channel_id: int) -> bool:
+        return bool(self.usernames.get(channel_id))
+
+    def ensure_music_bot_joined(self, channel_id: int) -> bool:
+        if self.music_bot_presence.get(channel_id, False):
+            return False
+        self.music_bot_presence[channel_id] = True
+        self.music_bot_volumes.setdefault(channel_id, 1.0)
+        return True
+
+    def remove_music_bot(self, channel_id: int) -> bool:
+        removed = bool(self.music_bot_presence.pop(channel_id, None))
+        self.music_bot_volumes.pop(channel_id, None)
+        return removed
+
+    def music_bot_joined(self, channel_id: int) -> bool:
+        return self.music_bot_presence.get(channel_id, False)
+
+    def set_music_bot_volume(self, channel_id: int, volume: float) -> float:
+        normalized_volume = max(0.0, min(1.0, float(volume)))
+        self.music_bot_volumes[channel_id] = normalized_volume
+        return normalized_volume
+
+    def music_bot_volume(self, channel_id: int) -> float:
+        return self.music_bot_volumes.get(channel_id, 1.0)
 
     def find_channel_for_user(self, user_id: int) -> int | None:
         for channel_id, channel_connections in self.active_connections.items():
@@ -396,6 +444,8 @@ class VoiceConnectionManager:
         channel_connections = self.active_connections.pop(channel_id, {})
         self.usernames.pop(channel_id, None)
         self.mute_states.pop(channel_id, None)
+        self.music_bot_presence.pop(channel_id, None)
+        self.music_bot_volumes.pop(channel_id, None)
         for websocket in list(channel_connections.values()):
             try:
                 await websocket.close(code=1008)
@@ -416,6 +466,41 @@ async def _send_music_bot_notice(channel_id: int, content: str) -> None:
                 "content": content,
             }
         ),
+    )
+
+
+def _music_bot_participant_payload() -> Dict[str, Any]:
+    return {
+        "type": "participant_joined",
+        "user_id": MUSIC_BOT_USER_ID,
+        "username": MUSIC_BOT_USERNAME,
+        "is_muted": False,
+        "is_bot": True,
+    }
+
+
+async def _broadcast_music_bot_joined(voice_channel_id: int) -> None:
+    await voice_manager.broadcast(
+        voice_channel_id,
+        _music_bot_participant_payload(),
+    )
+
+
+async def _ensure_music_bot_joined_in_channel(voice_channel_id: int) -> bool:
+    joined_now = voice_manager.ensure_music_bot_joined(voice_channel_id)
+    if joined_now:
+        await _broadcast_music_bot_joined(voice_channel_id)
+    return joined_now
+
+
+async def _broadcast_music_bot_volume(voice_channel_id: int, volume: float) -> None:
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "music_volume",
+            "user_id": MUSIC_BOT_USER_ID,
+            "volume": volume,
+        },
     )
 
 
@@ -464,6 +549,88 @@ def _resolve_spotify_to_search_query(spotify_url: str) -> str:
     if not artists:
         return f"ytsearch1:{title}"
     return f"ytsearch1:{' '.join(artists)} - {title}"
+
+
+async def _handle_music_join_command(
+    channel_id: int,
+    user_id: int,
+    content: Any,
+) -> None:
+    if not isinstance(content, str):
+        return
+
+    if not JOIN_COMMAND_PATTERN.match(content.strip()):
+        return
+
+    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+    if voice_channel_id is None:
+        await _send_music_bot_notice(
+            channel_id,
+            "Join a voice channel first, then use join.",
+        )
+        return
+
+    joined_now = await _ensure_music_bot_joined_in_channel(voice_channel_id)
+    if joined_now:
+        await _send_music_bot_notice(channel_id, "Music bot joined your voice channel.")
+    else:
+        await _send_music_bot_notice(channel_id, "Music bot is already in your voice channel.")
+
+
+async def _handle_music_volume_command(
+    channel_id: int,
+    user_id: int,
+    content: Any,
+) -> None:
+    if not isinstance(content, str):
+        return
+
+    command_match = VOLUME_COMMAND_PATTERN.match(content.strip())
+    if not command_match:
+        return
+
+    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+    if voice_channel_id is None:
+        await _send_music_bot_notice(
+            channel_id,
+            "Join a voice channel first, then use volume <0-100>.",
+        )
+        return
+
+    raw_value = (command_match.group("value") or "").strip()
+    if not raw_value:
+        current_percent = round(voice_manager.music_bot_volume(voice_channel_id) * 100)
+        await _send_music_bot_notice(
+            channel_id,
+            f"Current music bot volume: {current_percent}%.",
+        )
+        return
+
+    if raw_value.endswith("%"):
+        raw_value = raw_value[:-1].strip()
+
+    try:
+        parsed_percent = float(raw_value)
+    except ValueError:
+        await _send_music_bot_notice(channel_id, "Usage: volume <0-100>")
+        return
+
+    if parsed_percent < 0 or parsed_percent > 100:
+        await _send_music_bot_notice(channel_id, "Volume must be between 0 and 100.")
+        return
+
+    await _ensure_music_bot_joined_in_channel(voice_channel_id)
+    normalized_volume = voice_manager.set_music_bot_volume(
+        voice_channel_id,
+        parsed_percent / 100.0,
+    )
+    await _broadcast_music_bot_volume(voice_channel_id, normalized_volume)
+
+    display_percent = f"{parsed_percent:.2f}".rstrip("0").rstrip(".")
+    await _send_music_bot_notice(
+        channel_id,
+        f"Music bot volume set to {display_percent}%.",
+    )
 
 
 async def _handle_music_play_command(
@@ -530,6 +697,9 @@ async def _handle_music_play_command(
         await _send_music_bot_notice(channel_id, "I couldn't load that link.")
         return
 
+    await _ensure_music_bot_joined_in_channel(voice_channel_id)
+    current_music_bot_volume = voice_manager.music_bot_volume(voice_channel_id)
+
     # Construct proxy URL if base_url is provided.
     final_stream_url = stream_url
     if base_url:
@@ -543,6 +713,7 @@ async def _handle_music_play_command(
             "source_url": raw_url,
             "stream_url": final_stream_url,
             "stream_is_manifest": _looks_like_manifest_url(stream_url),
+            "volume": current_music_bot_volume,
             "requested_by_user_id": user_id,
             "requested_by_username": username,
         },
@@ -551,6 +722,32 @@ async def _handle_music_play_command(
     await _send_music_bot_notice(
         channel_id,
         f"Now playing: {title}",
+    )
+
+
+async def _handle_music_bot_command(
+    channel_id: int,
+    user_id: int,
+    username: str,
+    content: Any,
+    base_url: str | None = None,
+) -> None:
+    await _handle_music_join_command(
+        channel_id=channel_id,
+        user_id=user_id,
+        content=content,
+    )
+    await _handle_music_volume_command(
+        channel_id=channel_id,
+        user_id=user_id,
+        content=content,
+    )
+    await _handle_music_play_command(
+        channel_id=channel_id,
+        user_id=user_id,
+        username=username,
+        content=content,
+        base_url=base_url,
     )
 
 
@@ -2697,7 +2894,7 @@ async def websocket_endpoint(
                 await manager.broadcast(channel_id, broadcast_msg)
                 if msg_type == "new_message":
                     base_url = _build_http_base_url_from_websocket(websocket)
-                    await _handle_music_play_command(
+                    await _handle_music_bot_command(
                         channel_id=channel_id,
                         user_id=user_id,
                         username=username,
@@ -2722,7 +2919,7 @@ async def websocket_endpoint(
                 )
                 await manager.broadcast(channel_id, broadcast_msg)
                 base_url = _build_http_base_url_from_websocket(websocket)
-                await _handle_music_play_command(
+                await _handle_music_bot_command(
                     channel_id=channel_id,
                     user_id=user_id,
                     username=username,
@@ -2772,6 +2969,16 @@ async def voice_websocket_endpoint(
             "participants": voice_manager.participants(voice_channel_id),
         },
     )
+    if voice_manager.music_bot_joined(voice_channel_id):
+        await voice_manager.send_to_user(
+            voice_channel_id,
+            user_id,
+            {
+                "type": "music_volume",
+                "user_id": MUSIC_BOT_USER_ID,
+                "volume": voice_manager.music_bot_volume(voice_channel_id),
+            },
+        )
 
     await voice_manager.broadcast(
         voice_channel_id,
@@ -2780,6 +2987,7 @@ async def voice_websocket_endpoint(
             "user_id": user_id,
             "username": username,
             "is_muted": voice_manager.mute_states.get(voice_channel_id, {}).get(user_id, False),
+            "is_bot": False,
         },
         exclude_user_id=user_id,
     )
@@ -2862,6 +3070,16 @@ async def voice_websocket_endpoint(
                     "user_id": user_id,
                 },
             )
+            if not voice_manager.has_real_participants(voice_channel_id):
+                removed_bot = voice_manager.remove_music_bot(voice_channel_id)
+                if removed_bot:
+                    await voice_manager.broadcast(
+                        voice_channel_id,
+                        {
+                            "type": "participant_left",
+                            "user_id": MUSIC_BOT_USER_ID,
+                        },
+                    )
 
 
 if __name__ == "__main__":

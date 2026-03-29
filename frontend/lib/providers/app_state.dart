@@ -19,6 +19,7 @@ class AppState extends ChangeNotifier {
   // static const String wsUrl = "ws://127.0.0.1:8000/ws";
   static const String baseUrl = "https://extochatapp.onrender.com";
   static const String wsUrl = "wss://extochatapp.onrender.com/ws";
+  static const int _musicBotUserId = -1;
 
   static const Map<String, dynamic> _rtcConfiguration = {
     'iceServers': [
@@ -246,14 +247,22 @@ class AppState extends ChangeNotifier {
     return channel.creatorUserId != null && channel.creatorUserId == userId;
   }
 
+  bool _isMusicBotParticipantId(int userId) => userId == _musicBotUserId;
+
+  double _maxVolumeForParticipant(int userId) {
+    return _isMusicBotParticipantId(userId) ? 1.0 : 5.0;
+  }
+
   double voiceParticipantVolumeFor(int userId) {
+    final maxVolume = _maxVolumeForParticipant(userId);
     return (_voiceParticipantVolumes[userId] ?? 1.0)
-        .clamp(0.0, 5.0)
+        .clamp(0.0, maxVolume)
         .toDouble();
   }
 
   void setVoiceParticipantVolume(int userId, double volume) {
-    final normalized = volume.clamp(0.0, 5.0);
+    final maxVolume = _maxVolumeForParticipant(userId);
+    final normalized = volume.clamp(0.0, maxVolume).toDouble();
     final previous = voiceParticipantVolumeFor(userId);
     if ((previous - normalized).abs() < 0.001) {
       return;
@@ -265,9 +274,13 @@ class AppState extends ChangeNotifier {
       _voiceParticipantVolumes[userId] = normalized;
     }
 
-    final renderer = _remoteAudioRenderers[userId];
-    if (renderer != null) {
-      unawaited(_applyRemoteRendererVolume(renderer, normalized));
+    if (_isMusicBotParticipantId(userId)) {
+      unawaited(_applyMusicPlaybackVolume(normalized));
+    } else {
+      final renderer = _remoteAudioRenderers[userId];
+      if (renderer != null) {
+        unawaited(_applyRemoteRendererVolume(renderer, normalized));
+      }
     }
 
     notifyListeners();
@@ -1671,7 +1684,7 @@ class AppState extends ChangeNotifier {
         final participant = VoiceParticipant.fromJson(payload);
         voiceParticipants[participant.userId] = participant;
 
-        if (participant.userId != currentUser?.id) {
+        if (participant.userId != currentUser?.id && !participant.isBot) {
           await _createOfferForUser(participant.userId);
         }
 
@@ -1705,6 +1718,11 @@ class AppState extends ChangeNotifier {
 
       if (type == 'music_play') {
         await _handleMusicPlaySignal(payload);
+        return;
+      }
+
+      if (type == 'music_volume') {
+        await _handleMusicVolumeSignal(payload);
         return;
       }
 
@@ -1742,6 +1760,12 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    final payloadVolume = _tryParseNormalizedMusicVolume(payload['volume']);
+    if (payloadVolume != null) {
+      setVoiceParticipantVolume(_musicBotUserId, payloadVolume);
+    }
+    final playbackVolume = voiceParticipantVolumeFor(_musicBotUserId);
+
     if (_isWindowsDesktop) {
       try {
         await _windowsMusicPlayer.stop();
@@ -1749,6 +1773,7 @@ class AppState extends ChangeNotifier {
           media_kit.Media(streamUrl),
           play: true,
         );
+        await _applyMusicPlaybackVolume(playbackVolume);
         voiceError = null;
         notifyListeners();
       } catch (error) {
@@ -1769,6 +1794,7 @@ class AppState extends ChangeNotifier {
     try {
       await _musicPlayer!.stop();
       await _musicPlayer!.setSource(UrlSource(streamUrl, mimeType: mimeType));
+      await _applyMusicPlaybackVolume(playbackVolume);
       await _musicPlayer!.resume();
       voiceError = null;
       notifyListeners();
@@ -1785,6 +1811,43 @@ class AppState extends ChangeNotifier {
         voiceError = "Unable to start music playback: $error";
       }
       notifyListeners();
+    }
+  }
+
+  Future<void> _handleMusicVolumeSignal(Map<String, dynamic> payload) async {
+    final userId = payload['user_id'];
+    final normalizedVolume = _tryParseNormalizedMusicVolume(payload['volume']);
+    if (userId is! int || normalizedVolume == null) {
+      return;
+    }
+
+    setVoiceParticipantVolume(userId, normalizedVolume);
+  }
+
+  double? _tryParseNormalizedMusicVolume(dynamic rawVolume) {
+    if (rawVolume is num) {
+      return rawVolume.toDouble().clamp(0.0, 1.0).toDouble();
+    }
+    if (rawVolume is String) {
+      final parsed = double.tryParse(rawVolume.trim());
+      if (parsed == null) {
+        return null;
+      }
+      return parsed.clamp(0.0, 1.0).toDouble();
+    }
+    return null;
+  }
+
+  Future<void> _applyMusicPlaybackVolume(double volume) async {
+    final normalized = volume.clamp(0.0, 1.0).toDouble();
+    try {
+      if (_isWindowsDesktop) {
+        await _windowsMusicPlayer.setVolume(normalized * 100.0);
+      } else {
+        await _musicPlayer!.setVolume(normalized);
+      }
+    } catch (_) {
+      // Ignore volume errors on platforms/backends that don't expose gain control.
     }
   }
 

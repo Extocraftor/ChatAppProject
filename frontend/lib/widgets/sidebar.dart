@@ -319,10 +319,14 @@ class _SidebarState extends State<Sidebar> {
     AppState state,
     VoiceParticipant participant,
   ) {
+    final isMusicBot = participant.isBot;
     final volume = state.voiceParticipantVolumeFor(participant.userId);
-    final sliderVolume = min(volume, 2.0);
+    final sliderMax = isMusicBot ? 1.0 : 2.0;
+    final sliderVolume = min(volume, sliderMax);
     final isCurrentUser = participant.userId == state.currentUser?.id;
-    final userLabel = isCurrentUser
+    final userLabel = isMusicBot
+        ? participant.username
+        : isCurrentUser
         ? "${participant.username} (You)"
         : participant.username;
     final isExpanded = _expandedParticipantId == participant.userId;
@@ -349,9 +353,15 @@ class _SidebarState extends State<Sidebar> {
               child: Row(
                 children: [
                   Icon(
-                    participant.isMuted ? Icons.mic_off : Icons.mic,
+                    isMusicBot
+                        ? Icons.music_note
+                        : participant.isMuted
+                        ? Icons.mic_off
+                        : Icons.mic,
                     size: 14,
-                    color: participant.isMuted
+                    color: isMusicBot
+                        ? Colors.lightBlueAccent
+                        : participant.isMuted
                         ? Colors.redAccent
                         : Colors.greenAccent,
                   ),
@@ -393,8 +403,8 @@ class _SidebarState extends State<Sidebar> {
                   child: Slider(
                     value: sliderVolume,
                     min: 0,
-                    max: 2,
-                    divisions: 40,
+                    max: sliderMax,
+                    divisions: isMusicBot ? 20 : 40,
                     onChanged: (next) =>
                         state.setVoiceParticipantVolume(participant.userId, next),
                   ),
@@ -431,8 +441,9 @@ class _SidebarState extends State<Sidebar> {
                 onFieldSubmitted: (text) {
                   final parsed = double.tryParse(text);
                   if (parsed != null) {
+                    final maxVolume = isMusicBot ? 1.0 : 5.0;
                     state.setVoiceParticipantVolume(
-                        participant.userId, (parsed / 100).clamp(0.0, 5.0));
+                        participant.userId, (parsed / 100).clamp(0.0, maxVolume));
                   }
                 },
               ),
@@ -582,6 +593,9 @@ class _SidebarState extends State<Sidebar> {
                       final bIsCurrent = b.userId == currentUserId;
                       if (aIsCurrent != bIsCurrent) {
                         return aIsCurrent ? -1 : 1;
+                      }
+                      if (a.isBot != b.isBot) {
+                        return a.isBot ? 1 : -1;
                       }
                       return a.username.toLowerCase().compareTo(
                             b.username.toLowerCase(),
