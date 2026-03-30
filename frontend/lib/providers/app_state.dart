@@ -31,6 +31,9 @@ class AppState extends ChangeNotifier {
   List<Channel> channels = [];
   Channel? activeChannel;
   WebSocketChannel? _channel;
+  Timer? _textPingTimer;
+  Timer? _textReconnectTimer;
+  int _textReconnectAttempt = 0;
   List<Message> messages = [];
   List<Message> pinnedMessages = [];
   bool pinnedMessagesLoading = false;
@@ -74,6 +77,10 @@ class AppState extends ChangeNotifier {
   bool isSelfMuted = false;
   bool _voiceConnecting = false;
   bool _voiceJoinInProgress = false;
+  bool _voiceShouldReconnect = false;
+  Timer? _voiceReconnectTimer;
+  VoiceChannel? _voiceReconnectChannel;
+  int _voiceReconnectAttempt = 0;
   String? voiceError;
   Timer? _voiceDiagnosticsTimer;
   bool _voiceDiagnosticsInFlight = false;
@@ -805,8 +812,7 @@ class AppState extends ChangeNotifier {
       if (activeChannel != null) {
         final stillExists = channels.any((c) => c.id == activeChannel!.id);
         if (!stillExists) {
-          _channel?.sink.close();
-          _channel = null;
+          _disconnectTextSocket();
           activeChannel = null;
           messages = [];
           pinnedMessages = [];
@@ -837,8 +843,7 @@ class AppState extends ChangeNotifier {
       }
 
       if (activeChannel?.id == channelId) {
-        _channel?.sink.close();
-        _channel = null;
+        _disconnectTextSocket();
         activeChannel = null;
         messages = [];
         pinnedMessages = [];
@@ -1463,48 +1468,166 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void selectChannel(Channel channel) {
-    activeChannel = channel;
-    messages = [];
-    pinnedMessages = [];
-    pinnedMessagesError = null;
-    pinnedMessagesLoading = false;
-    replyingTo = null;
-    editingMessage = null;
-    clearMessageSearch(notify: false);
-    _channel?.sink.close();
+  Duration _reconnectDelay({
+    required int attempt,
+    required int minSeconds,
+    required int maxSeconds,
+  }) {
+    final boundedExponent = attempt.clamp(0, 6) as int;
+    final rawSeconds = 1 << boundedExponent;
+    final boundedSeconds = rawSeconds < minSeconds
+        ? minSeconds
+        : (rawSeconds > maxSeconds ? maxSeconds : rawSeconds);
+    return Duration(seconds: boundedSeconds);
+  }
 
-    fetchMessages(channel.id);
-    unawaited(fetchPinnedMessages());
+  void _disconnectTextSocket() {
+    _textReconnectTimer?.cancel();
+    _textReconnectTimer = null;
+    _textReconnectAttempt = 0;
+    _stopTextPing();
 
-    _channel = createWsChannel(
-      Uri.parse("$wsUrl/${channel.id}/${currentUser!.id}"),
+    final channel = _channel;
+    _channel = null;
+    if (channel != null) {
+      unawaited(channel.sink.close());
+    }
+  }
+
+  void _connectTextSocket(Channel channel) {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    final socket = createWsChannel(
+      Uri.parse("$wsUrl/${channel.id}/$userId"),
+    );
+    _channel = socket;
+    _startTextPing();
+
+    socket.stream.listen(
+      _handleTextSocketData,
+      onDone: () => _handleTextSocketClosed(socket),
+      onError: (error) => _handleTextSocketClosed(socket, error: error),
+      cancelOnError: true,
     );
 
-    _channel!.stream.listen((data) {
-      final json = jsonDecode(data);
-      final type = json['type'] ?? 'new_message';
+    unawaited(
+      socket.ready.then((_) {
+        if (!identical(_channel, socket)) {
+          return;
+        }
+        _textReconnectAttempt = 0;
+      }).catchError((_) {
+        // Ignore ready failures; stream callbacks handle retries.
+      }),
+    );
+  }
+
+  void _handleTextSocketClosed(
+    WebSocketChannel closedChannel, {
+    Object? error,
+  }) {
+    if (!identical(_channel, closedChannel)) {
+      return;
+    }
+
+    if (error != null) {
+      debugPrint("text websocket closed with error: $error");
+    }
+
+    _channel = null;
+    _stopTextPing();
+
+    if (activeChannel == null || currentUser == null) {
+      return;
+    }
+
+    _scheduleTextReconnect();
+  }
+
+  void _scheduleTextReconnect() {
+    if (_textReconnectTimer != null) {
+      return;
+    }
+
+    final delay = _reconnectDelay(
+      attempt: _textReconnectAttempt,
+      minSeconds: 1,
+      maxSeconds: 20,
+    );
+    _textReconnectTimer = Timer(delay, () {
+      _textReconnectTimer = null;
+      final channel = activeChannel;
+      if (channel == null || currentUser == null) {
+        return;
+      }
+
+      _textReconnectAttempt += 1;
+      _connectTextSocket(channel);
+    });
+  }
+
+  void _startTextPing() {
+    _textPingTimer?.cancel();
+    _sendTextPing();
+    _textPingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (_channel == null) {
+        _stopTextPing();
+        return;
+      }
+      _sendTextPing();
+    });
+  }
+
+  void _sendTextPing() {
+    final channel = _channel;
+    if (channel == null) {
+      return;
+    }
+
+    try {
+      channel.sink.add(jsonEncode({"type": "ping"}));
+    } catch (_) {
+      // Stream callbacks will schedule a reconnect when close/error fires.
+    }
+  }
+
+  void _stopTextPing() {
+    _textPingTimer?.cancel();
+    _textPingTimer = null;
+  }
+
+  void _handleTextSocketData(dynamic data) {
+    try {
+      final payload = Map<String, dynamic>.from(jsonDecode(data));
+      final type = payload['type'] ?? 'new_message';
+
+      if (type == 'pong') {
+        return;
+      }
 
       if (type == 'new_message') {
-        final newMessage = Message.fromJson(json);
+        final newMessage = Message.fromJson(payload);
         messages.add(newMessage);
         if (newMessage.isPinned) {
           _applyPinStateFromMessage(newMessage);
         }
         _scrollToBottom();
       } else if (type == 'music_bot_notice') {
-        final content = (json['content'] ?? '').toString().trim();
+        final content = (payload['content'] ?? '').toString().trim();
         if (content.isNotEmpty) {
           _appendLocalSystemMessage(content);
           _scrollToBottom();
         }
       } else if (type == 'edit_message') {
-        final id = json['id'];
-        final content = json['content']?.toString() ?? '';
+        final id = payload['id'];
+        final content = payload['content']?.toString() ?? '';
         final mentionedUserIds =
-            _parseMentionUserIds(json['mentioned_user_ids']);
+            _parseMentionUserIds(payload['mentioned_user_ids']);
         final mentionedUsernames =
-            _parseMentionUsernames(json['mentioned_usernames']);
+            _parseMentionUsernames(payload['mentioned_usernames']);
         final index = messages.indexWhere((m) => m.id == id);
         if (index != -1) {
           messages[index] = messages[index].copyWith(
@@ -1532,24 +1655,24 @@ class AppState extends ChangeNotifier {
           );
         }
       } else if (type == 'delete_message') {
-        final id = json['id'];
+        final id = payload['id'];
         messages.removeWhere((m) => m.id == id);
         messageSearchResults.removeWhere((m) => m.id == id);
         pinnedMessages.removeWhere((m) => m.id == id);
       } else if (type == 'pin_message') {
-        final id = json['id'];
+        final id = payload['id'];
         if (id is int) {
           _applyPinStateById(
             messageId: id,
             isPinned: true,
-            pinnedAt: json['pinned_at']?.toString(),
+            pinnedAt: payload['pinned_at']?.toString(),
             pinnedByUserId:
-                json['pinned_by_user_id'] is int ? json['pinned_by_user_id'] : null,
-            pinnedByUsername: json['pinned_by_username']?.toString(),
+                payload['pinned_by_user_id'] is int ? payload['pinned_by_user_id'] : null,
+            pinnedByUsername: payload['pinned_by_username']?.toString(),
           );
         }
       } else if (type == 'unpin_message') {
-        final id = json['id'];
+        final id = payload['id'];
         if (id is int) {
           _applyPinStateById(
             messageId: id,
@@ -1560,8 +1683,27 @@ class AppState extends ChangeNotifier {
           );
         }
       }
+
       notifyListeners();
-    });
+    } catch (_) {
+      // Ignore malformed payloads to keep the stream alive.
+    }
+  }
+
+  void selectChannel(Channel channel) {
+    activeChannel = channel;
+    messages = [];
+    pinnedMessages = [];
+    pinnedMessagesError = null;
+    pinnedMessagesLoading = false;
+    replyingTo = null;
+    editingMessage = null;
+    clearMessageSearch(notify: false);
+
+    _disconnectTextSocket();
+    fetchMessages(channel.id);
+    unawaited(fetchPinnedMessages());
+    _connectTextSocket(channel);
 
     notifyListeners();
   }
@@ -1585,7 +1727,7 @@ class AppState extends ChangeNotifier {
     }
 
     _voiceJoinInProgress = true;
-    await leaveVoiceChannel(notify: false);
+    await leaveVoiceChannel(notify: false, disableAutoReconnect: false);
 
     _voiceConnecting = true;
     voiceError = null;
@@ -1623,6 +1765,11 @@ class AppState extends ChangeNotifier {
       _queuedRemoteIceCandidates.clear();
       _remoteDescriptionReadyUsers.clear();
       _voiceSignalProcessingQueue = Future.value();
+      _voiceShouldReconnect = true;
+      _voiceReconnectAttempt = 0;
+      _voiceReconnectChannel = channel;
+      _voiceReconnectTimer?.cancel();
+      _voiceReconnectTimer = null;
       _startVoicePing();
       _startVoiceDiagnostics();
 
@@ -1645,7 +1792,11 @@ class AppState extends ChangeNotifier {
       debugPrintStack(stackTrace: stackTrace);
       voiceError = "Unable to join voice channel ($failedStep): $e";
       _voiceConnecting = false;
-      await leaveVoiceChannel(notify: false, clearError: false);
+      await leaveVoiceChannel(
+        notify: false,
+        clearError: false,
+        disableAutoReconnect: false,
+      );
       notifyListeners();
       return false;
     } finally {
@@ -1654,7 +1805,8 @@ class AppState extends ChangeNotifier {
   }
 
   void _handleVoiceSocketClosed({Object? error}) {
-    if (activeVoiceChannel == null) {
+    final reconnectChannel = activeVoiceChannel;
+    if (reconnectChannel == null) {
       return;
     }
 
@@ -1662,7 +1814,87 @@ class AppState extends ChangeNotifier {
         ? "Voice channel disconnected"
         : "Voice connection error: $error";
 
-    unawaited(leaveVoiceChannel(notify: true, clearError: false));
+    unawaited(_recoverVoiceFromDisconnect(reconnectChannel));
+  }
+
+  Future<void> _recoverVoiceFromDisconnect(VoiceChannel reconnectChannel) async {
+    await leaveVoiceChannel(
+      notify: true,
+      clearError: false,
+      disableAutoReconnect: false,
+    );
+    if (!_voiceShouldReconnect || currentUser == null) {
+      return;
+    }
+
+    _voiceReconnectChannel = reconnectChannel;
+    _scheduleVoiceReconnect();
+  }
+
+  void _scheduleVoiceReconnect() {
+    if (_voiceReconnectTimer != null || !_voiceShouldReconnect) {
+      return;
+    }
+
+    final delay = _reconnectDelay(
+      attempt: _voiceReconnectAttempt,
+      minSeconds: 2,
+      maxSeconds: 20,
+    );
+    _voiceReconnectTimer = Timer(delay, () {
+      _voiceReconnectTimer = null;
+      unawaited(_attemptVoiceReconnect());
+    });
+  }
+
+  Future<void> _attemptVoiceReconnect() async {
+    if (!_voiceShouldReconnect || currentUser == null) {
+      return;
+    }
+
+    final pendingChannel = _voiceReconnectChannel;
+    if (pendingChannel == null) {
+      return;
+    }
+
+    VoiceChannel? targetChannel;
+    for (final channel in voiceChannels) {
+      if (channel.id == pendingChannel.id) {
+        targetChannel = channel;
+        break;
+      }
+    }
+
+    if (targetChannel == null) {
+      await fetchVoiceChannels();
+      for (final channel in voiceChannels) {
+        if (channel.id == pendingChannel.id) {
+          targetChannel = channel;
+          break;
+        }
+      }
+    }
+
+    if (targetChannel == null) {
+      _voiceShouldReconnect = false;
+      _voiceReconnectChannel = null;
+      _voiceReconnectAttempt = 0;
+      voiceError = "Voice channel is no longer available.";
+      notifyListeners();
+      return;
+    }
+
+    _voiceReconnectAttempt += 1;
+    final joined = await joinVoiceChannel(targetChannel, forceRejoin: true);
+    if (joined) {
+      _voiceReconnectAttempt = 0;
+      _voiceReconnectChannel = targetChannel;
+      return;
+    }
+
+    if (_voiceShouldReconnect) {
+      _scheduleVoiceReconnect();
+    }
   }
 
   void _enqueueVoiceSignal(dynamic data) {
@@ -2248,8 +2480,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> leaveVoiceChannel(
-      {bool notify = true, bool clearError = true}) async {
+  Future<void> leaveVoiceChannel({
+    bool notify = true,
+    bool clearError = true,
+    bool disableAutoReconnect = true,
+  }) async {
+    if (disableAutoReconnect) {
+      _voiceShouldReconnect = false;
+      _voiceReconnectChannel = null;
+      _voiceReconnectAttempt = 0;
+      _voiceReconnectTimer?.cancel();
+      _voiceReconnectTimer = null;
+    }
+
     final existingTask = _leaveVoiceChannelTask;
     if (existingTask != null) {
       await existingTask;
@@ -3267,7 +3510,11 @@ class AppState extends ChangeNotifier {
         "id": editingMessage!.id,
         "content": content,
       };
-      _channel!.sink.add(jsonEncode(messageData));
+      try {
+        _channel!.sink.add(jsonEncode(messageData));
+      } catch (_) {
+        _scheduleTextReconnect();
+      }
       editingMessage = null;
     } else {
       final messageData = {
@@ -3275,7 +3522,11 @@ class AppState extends ChangeNotifier {
         "content": content,
         "parent_id": replyingTo?.id,
       };
-      _channel!.sink.add(jsonEncode(messageData));
+      try {
+        _channel!.sink.add(jsonEncode(messageData));
+      } catch (_) {
+        _scheduleTextReconnect();
+      }
       replyingTo = null;
     }
 
@@ -3288,13 +3539,22 @@ class AppState extends ChangeNotifier {
         "type": "delete_message",
         "id": messageId,
       };
-      _channel!.sink.add(jsonEncode(messageData));
+      try {
+        _channel!.sink.add(jsonEncode(messageData));
+      } catch (_) {
+        _scheduleTextReconnect();
+      }
     }
   }
 
   @override
   void dispose() {
-    _channel?.sink.close();
+    _disconnectTextSocket();
+    _voiceShouldReconnect = false;
+    _voiceReconnectChannel = null;
+    _voiceReconnectAttempt = 0;
+    _voiceReconnectTimer?.cancel();
+    _voiceReconnectTimer = null;
     _voiceSignalChannel?.sink.close();
     unawaited(_musicPlayerCompletionSubscription?.cancel() ?? Future.value());
     unawaited(_windowsMusicCompletedSubscription?.cancel() ?? Future.value());
@@ -3304,6 +3564,10 @@ class AppState extends ChangeNotifier {
     _suppressMusicCompletionSignals = true;
     _voicePingTimer?.cancel();
     _voicePingTimer = null;
+    _textPingTimer?.cancel();
+    _textPingTimer = null;
+    _textReconnectTimer?.cancel();
+    _textReconnectTimer = null;
     _voiceDiagnosticsTimer?.cancel();
     _voiceDiagnosticsTimer = null;
     _inputTestTimer?.cancel();

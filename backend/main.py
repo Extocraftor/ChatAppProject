@@ -263,6 +263,14 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory=ATTACHMENT_UPLOAD_DIR), name="uploads")
 
 
+@app.get("/healthz")
+def healthz() -> Dict[str, str]:
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+
+
 # Connection Manager for text channels
 class ConnectionManager:
     def __init__(self):
@@ -2989,6 +2997,16 @@ async def websocket_endpoint(
                             "id": msg_id,
                         }
                     )
+                elif msg_type == "ping":
+                    pong_payload: Dict[str, Any] = {"type": "pong"}
+                    ping_id = data_json.get("ping_id")
+                    if ping_id is not None:
+                        try:
+                            pong_payload["ping_id"] = int(ping_id)
+                        except (TypeError, ValueError):
+                            pass
+                    await websocket.send_text(json.dumps(pong_payload))
+                    continue
                 else:
                     continue
 
@@ -3028,7 +3046,16 @@ async def websocket_endpoint(
                     base_url=base_url,
                 )
 
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as disconnect_event:
+        logger.info(
+            "text disconnect channel=%s user=%s code=%s",
+            channel_id,
+            user_id,
+            disconnect_event.code,
+        )
+        manager.disconnect(websocket, channel_id)
+    except Exception:
+        logger.exception("text socket error channel=%s user=%s", channel_id, user_id)
         manager.disconnect(websocket, channel_id)
 
 
