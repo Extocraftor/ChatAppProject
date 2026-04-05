@@ -582,15 +582,19 @@ class _MessageInputState extends State<MessageInput> {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final activeChannel = state.activeChannel;
-    final replyingTo = state.replyingTo;
-    final editingMessage = state.editingMessage;
+    final activeChannel =
+        context.select<AppState, Channel?>((s) => s.activeChannel);
+    final replyingTo = context.select<AppState, Message?>((s) => s.replyingTo);
+    final editingMessage =
+        context.select<AppState, Message?>((s) => s.editingMessage);
+    final attachmentUploadInProgress =
+        context.select<AppState, bool>((s) => s.attachmentUploadInProgress);
+
     final selectedAttachment = _selectedAttachment;
     final mentionQuery = _activeMentionQuery();
     final mentionSuggestions = mentionQuery == null
         ? const <User>[]
-        : state.findMentionCandidates(mentionQuery.query);
+        : context.read<AppState>().findMentionCandidates(mentionQuery.query);
     final showMentionSuggestions = mentionSuggestions.isNotEmpty;
     final hasReplyOrEditBanner = replyingTo != null || editingMessage != null;
     final hasContextBanner = hasReplyOrEditBanner || selectedAttachment != null;
@@ -665,6 +669,7 @@ class _MessageInputState extends State<MessageInput> {
                   IconButton(
                     icon: const Icon(Icons.close, size: 16, color: Colors.grey),
                     onPressed: () {
+                      final state = context.read<AppState>();
                       state.setReplyingTo(null);
                       state.setEditingMessage(null);
                       _controller.clear();
@@ -707,7 +712,7 @@ class _MessageInputState extends State<MessageInput> {
                   const SizedBox(width: 8),
                   IconButton(
                     icon: const Icon(Icons.close, size: 16, color: Colors.grey),
-                    onPressed: state.attachmentUploadInProgress
+                    onPressed: attachmentUploadInProgress
                         ? null
                         : () {
                             setState(() {
@@ -738,7 +743,8 @@ class _MessageInputState extends State<MessageInput> {
                 filled: true,
                 fillColor: const Color(0xFF40444B),
                 border: OutlineInputBorder(
-                  borderRadius: _inputBorderRadius(hasContextBanner: hasContextBanner),
+                  borderRadius:
+                      _inputBorderRadius(hasContextBanner: hasContextBanner),
                   borderSide: BorderSide.none,
                 ),
                 suffixIconConstraints: const BoxConstraints(minWidth: 144),
@@ -748,7 +754,7 @@ class _MessageInputState extends State<MessageInput> {
                     IconButton(
                       tooltip: 'Attach file',
                       icon: const Icon(Icons.attach_file),
-                      onPressed: state.attachmentUploadInProgress
+                      onPressed: attachmentUploadInProgress
                           ? null
                           : () {
                               _pickAttachment();
@@ -761,11 +767,11 @@ class _MessageInputState extends State<MessageInput> {
                             ? Icons.keyboard
                             : Icons.emoji_emotions_outlined,
                       ),
-                      onPressed: state.attachmentUploadInProgress
+                      onPressed: attachmentUploadInProgress
                           ? null
                           : _toggleEmojiPicker,
                     ),
-                    state.attachmentUploadInProgress
+                    attachmentUploadInProgress
                         ? const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 12),
                             child: SizedBox(
@@ -792,6 +798,7 @@ class _MessageInputState extends State<MessageInput> {
       ),
     );
   }
+
 }
 
 class _MentionQuery {

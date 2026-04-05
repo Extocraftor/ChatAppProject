@@ -186,15 +186,23 @@ class _MessageItemState extends State<MessageItem> {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final isHighlighted = state.highlightedMessageId == widget.message.id;
-    final isOwnMessage = state.currentUser?.id == widget.message.userId;
-    final canDeleteMessage = isOwnMessage || state.canDeleteAnyMessage;
-    final canPinMessage = state.canModerateChannels;
+    final isHighlighted = context.select<AppState, bool>(
+        (s) => s.highlightedMessageId == widget.message.id);
+    final currentUserId =
+        context.select<AppState, int?>((s) => s.currentUser?.id);
+    final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
+    final canModerateChannels =
+        context.select<AppState, bool>((s) => s.canModerateChannels);
+
+    final isOwnMessage = currentUserId == widget.message.userId;
+    final canDeleteAnyMessage = isAdmin;
+    final canDeleteMessage = isOwnMessage || canDeleteAnyMessage;
+    final canPinMessage = canModerateChannels;
+
     final attachmentPath = widget.message.attachmentUrl;
     final attachmentUrl = (attachmentPath == null || attachmentPath.isEmpty)
         ? null
-        : state.resolveMediaUrl(attachmentPath);
+        : context.read<AppState>().resolveMediaUrl(attachmentPath);
     final hasImageAttachment =
         attachmentUrl != null && _isImageAttachment(widget.message);
     final hasTextContent = widget.message.content.trim().isNotEmpty;
@@ -206,9 +214,9 @@ class _MessageItemState extends State<MessageItem> {
         duration: const Duration(milliseconds: 300),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         color: isHighlighted
-            ? Colors.yellow.withValues(alpha: 0.1)
+            ? Colors.yellow.withOpacity(0.1)
             : (_isHovered
-                ? Colors.white.withValues(alpha: 0.05)
+                ? Colors.white.withOpacity(0.05)
                 : Colors.transparent),
         child: Stack(
           clipBehavior: Clip.none,
@@ -220,8 +228,9 @@ class _MessageItemState extends State<MessageItem> {
                   Padding(
                     padding: const EdgeInsets.only(left: 36, bottom: 4),
                     child: InkWell(
-                      onTap: () =>
-                          state.highlightMessage(widget.message.parentId!),
+                      onTap: () => context
+                          .read<AppState>()
+                          .highlightMessage(widget.message.parentId!),
                       child: Row(
                         children: [
                           const Icon(Icons.reply, size: 14, color: Colors.grey),
@@ -396,7 +405,9 @@ class _MessageItemState extends State<MessageItem> {
                       IconButton(
                         icon: const Icon(Icons.reply,
                             size: 18, color: Colors.grey),
-                        onPressed: () => state.setReplyingTo(widget.message),
+                        onPressed: () => context
+                            .read<AppState>()
+                            .setReplyingTo(widget.message),
                         tooltip: "Reply",
                         constraints: const BoxConstraints(),
                       ),
@@ -404,8 +415,9 @@ class _MessageItemState extends State<MessageItem> {
                         IconButton(
                           icon: const Icon(Icons.edit,
                               size: 18, color: Colors.grey),
-                          onPressed: () =>
-                              state.setEditingMessage(widget.message),
+                          onPressed: () => context
+                              .read<AppState>()
+                              .setEditingMessage(widget.message),
                           tooltip: "Edit",
                           constraints: const BoxConstraints(),
                         ),
@@ -414,7 +426,8 @@ class _MessageItemState extends State<MessageItem> {
                         IconButton(
                           icon: const Icon(Icons.delete,
                               size: 18, color: Colors.redAccent),
-                          onPressed: () => _showDeleteDialog(context, state),
+                          onPressed: () => _showDeleteDialog(
+                              context, context.read<AppState>()),
                           tooltip: "Delete",
                           constraints: const BoxConstraints(),
                         ),
@@ -429,9 +442,9 @@ class _MessageItemState extends State<MessageItem> {
                                 ? Colors.amberAccent
                                 : Colors.grey,
                           ),
-                          onPressed: () => _togglePin(context, state),
-                          tooltip:
-                              widget.message.isPinned ? "Unpin" : "Pin",
+                          onPressed: () =>
+                              _togglePin(context, context.read<AppState>()),
+                          tooltip: widget.message.isPinned ? "Unpin" : "Pin",
                           constraints: const BoxConstraints(),
                         ),
                     ],
@@ -443,4 +456,5 @@ class _MessageItemState extends State<MessageItem> {
       ),
     );
   }
+
 }

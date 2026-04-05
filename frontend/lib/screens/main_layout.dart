@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
@@ -15,7 +16,11 @@ class MainLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
+    final activeChannelName =
+        context.select<AppState, String>((s) => s.activeChannel?.name ?? "");
+    final activeChannelId =
+        context.select<AppState, int?>((s) => s.activeChannel?.id);
+    final messageCount = context.select<AppState, int>((s) => s.messages.length);
 
     return Scaffold(
       body: Row(
@@ -35,14 +40,14 @@ class MainLayout extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          "# ${state.activeChannel?.name ?? ''}",
+                          "# $activeChannelName",
                           style: const TextStyle(fontWeight: FontWeight.bold),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
                       IconButton(
                         tooltip: "Pinned messages",
-                        onPressed: state.activeChannel == null
+                        onPressed: activeChannelId == null
                             ? null
                             : () {
                                 showDialog<void>(
@@ -54,7 +59,7 @@ class MainLayout extends StatelessWidget {
                       ),
                       IconButton(
                         tooltip: "Search messages",
-                        onPressed: state.activeChannel == null
+                        onPressed: activeChannelId == null
                             ? null
                             : () {
                                 showDialog<void>(
@@ -68,12 +73,19 @@ class MainLayout extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: ListView.builder(
-                    controller: state.scrollController,
+                  child: ScrollablePositionedList.builder(
+                    itemScrollController:
+                        context.read<AppState>().itemScrollController,
+                    itemPositionsListener:
+                        context.read<AppState>().itemPositionsListener,
                     padding: const EdgeInsets.all(16),
-                    itemCount: state.messages.length,
+                    itemCount: messageCount,
                     itemBuilder: (context, index) {
-                      return MessageItem(message: state.messages[index]);
+                      final messages = context.read<AppState>().messages;
+                      if (index < 0 || index >= messages.length) {
+                        return const SizedBox.shrink();
+                      }
+                      return MessageItem(message: messages[index]);
                     },
                   ),
                 ),
@@ -85,6 +97,7 @@ class MainLayout extends StatelessWidget {
       ),
     );
   }
+
 }
 
 class _MessageSearchDialog extends StatefulWidget {

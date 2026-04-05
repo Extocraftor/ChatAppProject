@@ -16,6 +16,7 @@ dependencies:
   media_kit: ^1.1.11
   media_kit_libs_windows_audio: ^1.0.9
   file_picker: ^10.3.10
+  scrollable_positioned_list: ^0.3.8
 
 dev_dependencies:
   flutter_test:

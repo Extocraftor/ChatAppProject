@@ -8,50 +8,115 @@ import '../providers/app_state.dart';
 import '../screens/admin_permissions_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
 
-class Sidebar extends StatefulWidget {
+class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
 
   @override
-  State<Sidebar> createState() => _SidebarState();
-}
+  Widget build(BuildContext context) {
+    final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
+    final canCreateChannels =
+        context.select<AppState, bool>((s) => s.canCreateChannels);
+    final currentUsername =
+        context.select<AppState, String>((s) => s.currentUser?.username ?? "");
+    final channels = context.select<AppState, List<Channel>>((s) => s.channels);
+    final voiceChannels =
+        context.select<AppState, List<VoiceChannel>>((s) => s.voiceChannels);
+    final activeVoiceChannelId =
+        context.select<AppState, int?>((s) => s.activeVoiceChannel?.id);
 
-class _SidebarState extends State<Sidebar> {
-  int? _expandedParticipantId;
-
-  String _pingText(int? pingMs) {
-    if (pingMs == null) {
-      return "-- ms";
-    }
-    return "$pingMs ms";
-  }
-
-  Color _pingColor(int? pingMs) {
-    if (pingMs == null) {
-      return Colors.grey;
-    }
-    if (pingMs <= 90) {
-      return Colors.greenAccent;
-    }
-    if (pingMs <= 180) {
-      return Colors.amberAccent;
-    }
-    return Colors.redAccent;
-  }
-
-  Color _micLevelColor(AppState state, double micLevel) {
-    if (!state.hasLocalAudioTrack || !state.isLocalMicTrackEnabled) {
-      return Colors.grey;
-    }
-    if (state.isSelfMuted) {
-      return Colors.redAccent;
-    }
-    if (micLevel > 0.7) {
-      return Colors.greenAccent;
-    }
-    if (micLevel > 0.35) {
-      return Colors.lightGreenAccent;
-    }
-    return Colors.blueAccent;
+    return Container(
+      width: 270,
+      color: const Color(0xFF2F3136),
+      child: Column(
+        children: [
+          Container(
+            height: 50,
+            alignment: Alignment.centerLeft,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: Color(0xFF202225))),
+            ),
+            child: const Text(
+              "Harmony",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                if (isAdmin)
+                  Material(
+                    type: MaterialType.transparency,
+                    child: ListTile(
+                      dense: true,
+                      leading: const Icon(
+                        Icons.admin_panel_settings_outlined,
+                        color: Colors.amberAccent,
+                      ),
+                      title: const Text("Admin Permissions"),
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const AdminPermissionsScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                if (isAdmin)
+                  const Divider(height: 1, color: Color(0xFF202225)),
+                _SectionHeader(
+                  title: "TEXT CHANNELS",
+                  icon: Icons.tag,
+                  onAdd: () => _showCreateChannelDialog(
+                    context,
+                    context.read<AppState>(),
+                    isVoice: false,
+                  ),
+                  canAdd: canCreateChannels,
+                ),
+                ...channels.map((channel) => _TextChannelTile(channel: channel)),
+                const SizedBox(height: 10),
+                _SectionHeader(
+                  title: "VOICE CHANNELS",
+                  icon: Icons.volume_up,
+                  onAdd: () => _showCreateChannelDialog(
+                    context,
+                    context.read<AppState>(),
+                    isVoice: true,
+                  ),
+                  canAdd: canCreateChannels,
+                ),
+                ...voiceChannels.map((channel) => _VoiceChannelTile(channel: channel)),
+              ],
+            ),
+          ),
+          if (activeVoiceChannelId != null) const _VoiceStatusPanel(),
+          Container(
+            padding: const EdgeInsets.all(8),
+            color: const Color(0xFF292B2F),
+            child: Row(
+              children: [
+                const CircleAvatar(
+                  backgroundColor: Color(0xFF5865F2),
+                  child: Icon(Icons.person, color: Colors.white),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    currentUsername,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const Icon(Icons.settings, color: Colors.grey),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showCreateChannelDialog(
@@ -91,7 +156,8 @@ class _SidebarState extends State<Sidebar> {
                     });
                   },
                   title: const Text("Admins only"),
-                  subtitle: const Text("Hide this channel from non-admin users"),
+                  subtitle:
+                      const Text("Hide this channel from non-admin users"),
                 ),
               ],
             ],
@@ -99,7 +165,8 @@ class _SidebarState extends State<Sidebar> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text("Cancel", style: TextStyle(color: Colors.white)),
+              child:
+                  const Text("Cancel", style: TextStyle(color: Colors.white)),
             ),
             ElevatedButton(
               onPressed: () async {
@@ -130,46 +197,23 @@ class _SidebarState extends State<Sidebar> {
       ),
     );
   }
+}
 
-  Future<void> _handleVoiceChannelTap(
-    BuildContext context,
-    AppState state,
-    VoiceChannel channel,
-  ) async {
-    if (state.isVoiceConnecting) {
-      return;
-    }
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({
+    required this.title,
+    required this.icon,
+    required this.onAdd,
+    this.canAdd = true,
+  });
 
-    final isActive = state.activeVoiceChannel?.id == channel.id;
-    if (isActive) {
-      await state.leaveVoiceChannel();
-      if (mounted) {
-        setState(() {
-          _expandedParticipantId = null;
-        });
-      }
-      return;
-    }
+  final String title;
+  final IconData icon;
+  final VoidCallback onAdd;
+  final bool canAdd;
 
-    final joined = await state.joinVoiceChannel(channel);
-    if (joined && mounted) {
-      setState(() {
-        _expandedParticipantId = null;
-      });
-    }
-    if (!joined && state.voiceError != null && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(state.voiceError!)),
-      );
-    }
-  }
-
-  Widget _sectionHeader({
-    required String title,
-    required IconData icon,
-    required VoidCallback onAdd,
-    bool canAdd = true,
-  }) {
+  @override
+  Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
       child: Row(
@@ -196,6 +240,96 @@ class _SidebarState extends State<Sidebar> {
               constraints: const BoxConstraints(),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _TextChannelTile extends StatelessWidget {
+  const _TextChannelTile({required this.channel});
+  final Channel channel;
+
+  @override
+  Widget build(BuildContext context) {
+    final isActive = context.select<AppState, bool>(
+        (s) => s.activeChannel?.id == channel.id);
+    final canDeleteChannel = context.select<AppState, bool>(
+        (s) => s.canDeleteTextChannel(channel));
+    final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
+
+    final trailingActions = <Widget>[
+      if (isAdmin)
+        IconButton(
+          icon: const Icon(
+            Icons.tune,
+            size: 18,
+            color: Colors.lightBlueAccent,
+          ),
+          tooltip: "Channel settings",
+          onPressed: () => _showTextChannelSettingsDialog(
+            context,
+            context.read<AppState>(),
+            channel,
+          ),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+        ),
+      if (canDeleteChannel)
+        IconButton(
+          icon: const Icon(
+            Icons.delete_outline,
+            size: 18,
+            color: Colors.redAccent,
+          ),
+          tooltip: "Delete channel",
+          onPressed: () => _showDeleteTextChannelDialog(
+            context,
+            context.read<AppState>(),
+            channel,
+          ),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+        ),
+    ];
+
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        dense: true,
+        leading: const Text("#",
+            style: TextStyle(fontSize: 20, color: Colors.grey)),
+        title: Text(
+          channel.name,
+          style: TextStyle(
+              color: isActive ? Colors.white : Colors.grey),
+        ),
+        onTap: () => context.read<AppState>().selectChannel(channel),
+        selected: isActive,
+        selectedTileColor: const Color(0xFF40444B),
+        trailing: trailingActions.isEmpty
+            ? null
+            : SizedBox(
+                width: 28.0 * trailingActions.length,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: trailingActions,
+                ),
+              ),
+      ),
+    );
+  }
+
+  Future<void> _showTextChannelSettingsDialog(
+    BuildContext context,
+    AppState state,
+    Channel channel,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _ChannelSettingsDialog(
+        channelId: channel.id,
+        channelName: channel.name,
+        isVoiceChannel: false,
       ),
     );
   }
@@ -231,12 +365,206 @@ class _SidebarState extends State<Sidebar> {
       return;
     }
 
-    final success = await state.deleteChannel(channel.id);
-    if (!success && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Unable to delete text channel")),
+    await state.deleteChannel(channel.id);
+  }
+}
+
+class _VoiceChannelTile extends StatelessWidget {
+  const _VoiceChannelTile({required this.channel});
+  final VoiceChannel channel;
+
+  @override
+  Widget build(BuildContext context) {
+    final isActive = context.select<AppState, bool>(
+        (s) => s.activeVoiceChannel?.id == channel.id);
+    final canDeleteChannel = context.select<AppState, bool>(
+        (s) => s.canDeleteVoiceChannel(channel));
+    final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
+    final isConnecting = context.select<AppState, bool>((s) => s.isVoiceConnecting);
+
+    List<VoiceParticipant> participants = [];
+    if (isActive) {
+      participants = context.select<AppState, List<VoiceParticipant>>(
+          (s) => s.voiceParticipants.values.toList());
+      final currentUserId =
+          context.select<AppState, int?>((s) => s.currentUser?.id);
+      participants.sort((a, b) {
+        final aIsCurrent = a.userId == currentUserId;
+        final bIsCurrent = b.userId == currentUserId;
+        if (aIsCurrent != bIsCurrent) {
+          return aIsCurrent ? -1 : 1;
+        }
+        if (a.isBot != b.isBot) {
+          return a.isBot ? 1 : -1;
+        }
+        return a.username.toLowerCase().compareTo(
+              b.username.toLowerCase(),
+            );
+      });
+    }
+
+    Widget? trailing;
+    if (isActive) {
+      final activeActions = <Widget>[
+        if (isAdmin)
+          IconButton(
+            icon: const Icon(
+              Icons.tune,
+              color: Colors.lightBlueAccent,
+              size: 18,
+            ),
+            tooltip: "Channel settings",
+            onPressed: () => _showVoiceChannelSettingsDialog(
+              context,
+              context.read<AppState>(),
+              channel,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        if (canDeleteChannel)
+          IconButton(
+            icon: const Icon(
+              Icons.delete_outline,
+              color: Colors.redAccent,
+              size: 18,
+            ),
+            tooltip: "Delete channel",
+            onPressed: () => _showDeleteVoiceChannelDialog(
+              context,
+              context.read<AppState>(),
+              channel,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        IconButton(
+          icon: const Icon(
+            Icons.call_end,
+            color: Colors.redAccent,
+            size: 18,
+          ),
+          tooltip: "Leave voice channel",
+          onPressed: () => context.read<AppState>().leaveVoiceChannel(),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+        ),
+      ];
+      trailing = SizedBox(
+        width: 28.0 * activeActions.length,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: activeActions,
+        ),
+      );
+    } else if (canDeleteChannel || isAdmin) {
+      final inactiveActions = <Widget>[
+        if (isAdmin)
+          IconButton(
+            icon: const Icon(
+              Icons.tune,
+              color: Colors.lightBlueAccent,
+              size: 18,
+            ),
+            tooltip: "Channel settings",
+            onPressed: () => _showVoiceChannelSettingsDialog(
+              context,
+              context.read<AppState>(),
+              channel,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        if (canDeleteChannel)
+          IconButton(
+            icon: const Icon(
+              Icons.delete_outline,
+              color: Colors.redAccent,
+              size: 18,
+            ),
+            tooltip: "Delete channel",
+            onPressed: () => _showDeleteVoiceChannelDialog(
+              context,
+              context.read<AppState>(),
+              channel,
+            ),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+      ];
+      trailing = SizedBox(
+        width: 28.0 * inactiveActions.length,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: inactiveActions,
+        ),
       );
     }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Material(
+          type: MaterialType.transparency,
+          child: ListTile(
+            dense: true,
+            leading: Icon(
+              isActive ? Icons.volume_up : Icons.volume_mute,
+              size: 20,
+              color: isActive ? Colors.white : Colors.grey,
+            ),
+            title: Text(
+              channel.name,
+              style: TextStyle(
+                  color: isActive ? Colors.white : Colors.grey),
+            ),
+            subtitle: isActive
+                ? Text("${participants.length} connected")
+                : null,
+            trailing: trailing,
+            selected: isActive,
+            selectedTileColor: const Color(0xFF40444B),
+            onTap: isConnecting ? null : () => _handleVoiceChannelTap(context, channel, isActive),
+          ),
+        ),
+        if (isActive && participants.isNotEmpty)
+          ...participants.map((participant) => _VoiceParticipantTile(participant: participant)),
+      ],
+    );
+  }
+
+  Future<void> _handleVoiceChannelTap(
+    BuildContext context,
+    VoiceChannel channel,
+    bool isActive,
+  ) async {
+    final state = context.read<AppState>();
+    if (isActive) {
+      await state.leaveVoiceChannel();
+      return;
+    }
+
+    final joined = await state.joinVoiceChannel(channel);
+    if (!joined && state.voiceError != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(state.voiceError!)),
+      );
+    }
+  }
+
+  Future<void> _showVoiceChannelSettingsDialog(
+    BuildContext context,
+    AppState state,
+    VoiceChannel channel,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _ChannelSettingsDialog(
+        channelId: channel.id,
+        channelName: channel.name,
+        isVoiceChannel: true,
+      ),
+    );
   }
 
   Future<void> _showDeleteVoiceChannelDialog(
@@ -270,65 +598,36 @@ class _SidebarState extends State<Sidebar> {
       return;
     }
 
-    final success = await state.deleteVoiceChannel(channel.id);
-    if (!success && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Unable to delete voice channel")),
-      );
-    }
+    await state.deleteVoiceChannel(channel.id);
   }
+}
 
-  Future<void> _showTextChannelSettingsDialog(
-    BuildContext context,
-    AppState state,
-    Channel channel,
-  ) async {
-    if (!state.isAdmin) {
-      return;
-    }
-    await showDialog<void>(
-      context: context,
-      builder: (_) => _ChannelSettingsDialog(
-        channelId: channel.id,
-        channelName: channel.name,
-        isVoiceChannel: false,
-      ),
-    );
-  }
+class _VoiceParticipantTile extends StatefulWidget {
+  const _VoiceParticipantTile({required this.participant});
+  final VoiceParticipant participant;
 
-  Future<void> _showVoiceChannelSettingsDialog(
-    BuildContext context,
-    AppState state,
-    VoiceChannel channel,
-  ) async {
-    if (!state.isAdmin) {
-      return;
-    }
-    await showDialog<void>(
-      context: context,
-      builder: (_) => _ChannelSettingsDialog(
-        channelId: channel.id,
-        channelName: channel.name,
-        isVoiceChannel: true,
-      ),
-    );
-  }
+  @override
+  State<_VoiceParticipantTile> createState() => _VoiceParticipantTileState();
+}
 
-  Widget _voiceParticipantTile(
-    BuildContext context,
-    AppState state,
-    VoiceParticipant participant,
-  ) {
-    final isMusicBot = participant.isBot;
-    final volume = state.voiceParticipantVolumeFor(participant.userId);
+class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
+  bool _isExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.read<AppState>();
+    final volume = context.select<AppState, double>(
+        (s) => s.voiceParticipantVolumeFor(widget.participant.userId));
     final sliderVolume = min(volume, 2.0);
-    final isCurrentUser = participant.userId == state.currentUser?.id;
+    final isCurrentUser = context.select<AppState, bool>(
+        (s) => s.currentUser?.id == widget.participant.userId);
+    
+    final isMusicBot = widget.participant.isBot;
     final userLabel = isMusicBot
-        ? participant.username
+        ? widget.participant.username
         : isCurrentUser
-        ? "${participant.username} (You)"
-        : participant.username;
-    final isExpanded = _expandedParticipantId == participant.userId;
+            ? "${widget.participant.username} (You)"
+            : widget.participant.username;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(40, 0, 12, 6),
@@ -343,8 +642,7 @@ class _SidebarState extends State<Sidebar> {
             borderRadius: BorderRadius.circular(8),
             onTap: () {
               setState(() {
-                _expandedParticipantId =
-                    isExpanded ? null : participant.userId;
+                _isExpanded = !_isExpanded;
               });
             },
             child: Padding(
@@ -354,32 +652,33 @@ class _SidebarState extends State<Sidebar> {
                   Icon(
                     isMusicBot
                         ? Icons.music_note
-                        : participant.isMuted
-                        ? Icons.mic_off
-                        : Icons.mic,
+                        : widget.participant.isMuted
+                            ? Icons.mic_off
+                            : Icons.mic,
                     size: 14,
                     color: isMusicBot
                         ? Colors.lightBlueAccent
-                        : participant.isMuted
-                        ? Colors.redAccent
-                        : Colors.greenAccent,
+                        : widget.participant.isMuted
+                            ? Colors.redAccent
+                            : Colors.greenAccent,
                   ),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       userLabel,
-                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      style:
+                          const TextStyle(fontSize: 12, color: Colors.white70),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (isExpanded)
+                  if (_isExpanded)
                     Text(
                       "${min(500, (volume * 100).round())}%",
                       style: const TextStyle(fontSize: 11, color: Colors.grey),
                     ),
                   const SizedBox(width: 4),
                   Icon(
-                    isExpanded ? Icons.expand_less : Icons.tune,
+                    _isExpanded ? Icons.expand_less : Icons.tune,
                     size: 14,
                     color: Colors.grey,
                   ),
@@ -404,18 +703,18 @@ class _SidebarState extends State<Sidebar> {
                     min: 0,
                     max: 2,
                     divisions: 40,
-                    onChanged: (next) =>
-                        state.setVoiceParticipantVolume(participant.userId, next),
+                    onChanged: (next) => state.setVoiceParticipantVolume(
+                        widget.participant.userId, next),
                   ),
                 ),
               ),
-              crossFadeState: isExpanded
+              crossFadeState: _isExpanded
                   ? CrossFadeState.showSecond
                   : CrossFadeState.showFirst,
               duration: const Duration(milliseconds: 150),
             ),
           ),
-          if (isExpanded)
+          if (_isExpanded)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               child: TextFormField(
@@ -425,14 +724,14 @@ class _SidebarState extends State<Sidebar> {
                 style: const TextStyle(color: Colors.white, fontSize: 13),
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
-                decoration: InputDecoration(
+                decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:
-                      const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                      EdgeInsets.symmetric(vertical: 4, horizontal: 8),
                   suffixText: "%",
                   filled: true,
-                  fillColor: const Color(0xFF2F3136),
-                  border: const OutlineInputBorder(
+                  fillColor: Color(0xFF2F3136),
+                  border: OutlineInputBorder(
                     borderRadius: BorderRadius.all(Radius.circular(6)),
                     borderSide: BorderSide.none,
                   ),
@@ -441,7 +740,7 @@ class _SidebarState extends State<Sidebar> {
                   final parsed = double.tryParse(text);
                   if (parsed != null) {
                     state.setVoiceParticipantVolume(
-                        participant.userId, (parsed / 100).clamp(0.0, 5.0));
+                        widget.participant.userId, (parsed / 100).clamp(0.0, 5.0));
                   }
                 },
               ),
@@ -450,409 +749,152 @@ class _SidebarState extends State<Sidebar> {
       ),
     );
   }
+}
+
+class _VoiceStatusPanel extends StatelessWidget {
+  const _VoiceStatusPanel();
+
+  String _pingText(int? pingMs) {
+    if (pingMs == null) {
+      return "-- ms";
+    }
+    return "$pingMs ms";
+  }
+
+  Color _pingColor(int? pingMs) {
+    if (pingMs == null) {
+      return Colors.grey;
+    }
+    if (pingMs <= 90) {
+      return Colors.greenAccent;
+    }
+    if (pingMs <= 180) {
+      return Colors.amberAccent;
+    }
+    return Colors.redAccent;
+  }
+
+  Color _micLevelColor(
+      bool hasTrack, bool isEnabled, bool isMuted, double micLevel) {
+    if (!hasTrack || !isEnabled) {
+      return Colors.grey;
+    }
+    if (isMuted) {
+      return Colors.redAccent;
+    }
+    if (micLevel > 0.7) {
+      return Colors.greenAccent;
+    }
+    if (micLevel > 0.35) {
+      return Colors.lightGreenAccent;
+    }
+    return Colors.blueAccent;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final micLevel = state.voiceMicLevel.clamp(0.0, 1.0).toDouble();
+    final state = context.read<AppState>();
+    final channelName = context
+        .select<AppState, String>((s) => s.activeVoiceChannel?.name ?? "");
+    final pingMs = context.select<AppState, int?>((s) => s.voicePingMs);
+    final signalStatus =
+        context.select<AppState, String>((s) => s.voiceSignalStatusLabel);
+    final micLevel = context.select<AppState, double>((s) => s.voiceMicLevel);
+    final isSelfMuted = context.select<AppState, bool>((s) => s.isSelfMuted);
+    final hasTrack =
+        context.select<AppState, bool>((s) => s.hasLocalAudioTrack);
+    final isTrackEnabled =
+        context.select<AppState, bool>((s) => s.isLocalMicTrackEnabled);
 
     return Container(
-      width: 270,
-      color: const Color(0xFF2F3136),
+      color: const Color(0xFF202225),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            height: 50,
-            alignment: Alignment.centerLeft,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: const BoxDecoration(
-              border: Border(bottom: BorderSide(color: Color(0xFF202225))),
-            ),
-            child: const Text(
-              "Harmony",
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                if (state.isAdmin)
-                  Material(
-                    type: MaterialType.transparency,
-                    child: ListTile(
-                      dense: true,
-                      leading: const Icon(
-                        Icons.admin_panel_settings_outlined,
-                        color: Colors.amberAccent,
-                      ),
-                      title: const Text("Admin Permissions"),
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const AdminPermissionsScreen(),
-                          ),
-                        );
-                      },
-                    ),
+          Row(
+            children: [
+              const Icon(Icons.graphic_eq, size: 16, color: Colors.greenAccent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  "Connected: $channelName",
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
                   ),
-                if (state.isAdmin) const Divider(height: 1, color: Color(0xFF202225)),
-                _sectionHeader(
-                  title: "TEXT CHANNELS",
-                  icon: Icons.tag,
-                  onAdd: () =>
-                      _showCreateChannelDialog(context, state, isVoice: false),
-                  canAdd: state.canCreateChannels,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                ...state.channels.map((channel) {
-                  final isActive = state.activeChannel?.id == channel.id;
-                  final canDeleteChannel = state.canDeleteTextChannel(channel);
-                  final canOpenSettings = state.isAdmin;
-
-                  final trailingActions = <Widget>[
-                    if (canOpenSettings)
-                      IconButton(
-                        icon: const Icon(
-                          Icons.tune,
-                          size: 18,
-                          color: Colors.lightBlueAccent,
-                        ),
-                        tooltip: "Channel settings",
-                        onPressed: () => _showTextChannelSettingsDialog(
-                          context,
-                          state,
-                          channel,
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    if (canDeleteChannel)
-                      IconButton(
-                        icon: const Icon(
-                          Icons.delete_outline,
-                          size: 18,
-                          color: Colors.redAccent,
-                        ),
-                        tooltip: "Delete channel",
-                        onPressed: () => _showDeleteTextChannelDialog(
-                          context,
-                          state,
-                          channel,
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                  ];
-
-                  return Material(
-                    type: MaterialType.transparency,
-                    child: ListTile(
-                      dense: true,
-                      leading: const Text("#",
-                          style: TextStyle(fontSize: 20, color: Colors.grey)),
-                      title: Text(
-                        channel.name,
-                        style: TextStyle(
-                            color: isActive ? Colors.white : Colors.grey),
-                      ),
-                      onTap: () => state.selectChannel(channel),
-                      selected: isActive,
-                      selectedTileColor: const Color(0xFF40444B),
-                      trailing: trailingActions.isEmpty
-                          ? null
-                          : SizedBox(
-                              width: 28.0 * trailingActions.length,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: trailingActions,
-                              ),
-                            ),
-                    ),
-                  );
-                }),
-                const SizedBox(height: 10),
-                _sectionHeader(
-                  title: "VOICE CHANNELS",
-                  icon: Icons.volume_up,
-                  onAdd: () =>
-                      _showCreateChannelDialog(context, state, isVoice: true),
-                  canAdd: state.canCreateChannels,
-                ),
-                ...state.voiceChannels.map((channel) {
-                  final isActive = state.activeVoiceChannel?.id == channel.id;
-                  final canDeleteChannel = state.canDeleteVoiceChannel(channel);
-                  final canOpenSettings = state.isAdmin;
-                  final participants =
-                      isActive ? state.voiceParticipants.values.toList() : <VoiceParticipant>[];
-                  if (isActive) {
-                    final currentUserId = state.currentUser?.id;
-                    participants.sort((a, b) {
-                      final aIsCurrent = a.userId == currentUserId;
-                      final bIsCurrent = b.userId == currentUserId;
-                      if (aIsCurrent != bIsCurrent) {
-                        return aIsCurrent ? -1 : 1;
-                      }
-                      if (a.isBot != b.isBot) {
-                        return a.isBot ? 1 : -1;
-                      }
-                      return a.username.toLowerCase().compareTo(
-                            b.username.toLowerCase(),
-                          );
-                    });
-                  }
-
-                  Widget? trailing;
-                  if (isActive) {
-                    final activeActions = <Widget>[
-                      if (canOpenSettings)
-                        IconButton(
-                          icon: const Icon(
-                            Icons.tune,
-                            color: Colors.lightBlueAccent,
-                            size: 18,
-                          ),
-                          tooltip: "Channel settings",
-                          onPressed: () => _showVoiceChannelSettingsDialog(
-                            context,
-                            state,
-                            channel,
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                      if (canDeleteChannel)
-                        IconButton(
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            color: Colors.redAccent,
-                            size: 18,
-                          ),
-                          tooltip: "Delete channel",
-                          onPressed: () => _showDeleteVoiceChannelDialog(
-                            context,
-                            state,
-                            channel,
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.call_end,
-                          color: Colors.redAccent,
-                          size: 18,
-                        ),
-                        tooltip: "Leave voice channel",
-                        onPressed: () => state.leaveVoiceChannel(),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ];
-                    trailing = SizedBox(
-                      width: 28.0 * activeActions.length,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: activeActions,
-                      ),
-                    );
-                  } else if (canDeleteChannel || canOpenSettings) {
-                    final inactiveActions = <Widget>[
-                      if (canOpenSettings)
-                        IconButton(
-                          icon: const Icon(
-                            Icons.tune,
-                            color: Colors.lightBlueAccent,
-                            size: 18,
-                          ),
-                          tooltip: "Channel settings",
-                          onPressed: () => _showVoiceChannelSettingsDialog(
-                            context,
-                            state,
-                            channel,
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                      if (canDeleteChannel)
-                        IconButton(
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            color: Colors.redAccent,
-                            size: 18,
-                          ),
-                          tooltip: "Delete channel",
-                          onPressed: () => _showDeleteVoiceChannelDialog(
-                            context,
-                            state,
-                            channel,
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                    ];
-                    trailing = SizedBox(
-                      width: 28.0 * inactiveActions.length,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: inactiveActions,
-                      ),
-                    );
-                  }
-
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Material(
-                        type: MaterialType.transparency,
-                        child: ListTile(
-                          dense: true,
-                          leading: Icon(
-                            isActive ? Icons.volume_up : Icons.volume_mute,
-                            size: 20,
-                            color: isActive ? Colors.white : Colors.grey,
-                          ),
-                          title: Text(
-                            channel.name,
-                            style: TextStyle(
-                                color: isActive ? Colors.white : Colors.grey),
-                          ),
-                          subtitle: isActive
-                              ? Text("${participants.length} connected")
-                              : null,
-                          trailing: trailing,
-                          selected: isActive,
-                          selectedTileColor: const Color(0xFF40444B),
-                          onTap: () =>
-                              _handleVoiceChannelTap(context, state, channel),
-                        ),
-                      ),
-                      if (isActive && participants.isNotEmpty)
-                        ...participants
-                            .map((participant) =>
-                                _voiceParticipantTile(context, state, participant)),
-                    ],
-                  );
-                }),
-              ],
-            ),
-          ),
-          if (state.activeVoiceChannel != null)
-            Container(
-              color: const Color(0xFF202225),
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.graphic_eq,
-                          size: 16, color: Colors.greenAccent),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          "Connected: ${state.activeVoiceChannel!.name}",
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: _pingColor(state.voicePingMs)
-                              .withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          _pingText(state.voicePingMs),
-                          style: TextStyle(
-                            color: _pingColor(state.voicePingMs),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    "Signal: ${state.voiceSignalStatusLabel}",
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
-                  ),
-                  const SizedBox(height: 6),
-                  ExcludeSemantics(
-                    child: _AnimatedMicInputLevel(
-                      targetLevel: micLevel,
-                      color: _micLevelColor(state, micLevel),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: state.toggleMute,
-                          icon: Icon(
-                            state.isSelfMuted ? Icons.mic_off : Icons.mic,
-                            size: 16,
-                          ),
-                          label: Text(state.isSelfMuted ? "Unmute" : "Mute"),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.white,
-                            side: const BorderSide(color: Color(0xFF4F545C)),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.analytics_outlined,
-                          color: Colors.lightBlueAccent,
-                        ),
-                        onPressed: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const VoiceDiagnosticsScreen(),
-                            ),
-                          );
-                        },
-                        tooltip: "Voice diagnostics",
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        icon:
-                            const Icon(Icons.call_end, color: Colors.redAccent),
-                        onPressed: () => state.leaveVoiceChannel(),
-                        tooltip: "Leave voice channel",
-                      ),
-                    ],
-                  ),
-                ],
               ),
-            ),
-          Container(
-            padding: const EdgeInsets.all(8),
-            color: const Color(0xFF292B2F),
-            child: Row(
-              children: [
-                const CircleAvatar(
-                  backgroundColor: Color(0xFF5865F2),
-                  child: Icon(Icons.person, color: Colors.white),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _pingColor(pingMs).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(999),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    state.currentUser!.username,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                    overflow: TextOverflow.ellipsis,
+                child: Text(
+                  _pingText(pingMs),
+                  style: TextStyle(
+                    color: _pingColor(pingMs),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-                const Icon(Icons.settings, color: Colors.grey),
-              ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            "Signal: $signalStatus",
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+          const SizedBox(height: 6),
+          ExcludeSemantics(
+            child: _AnimatedMicInputLevel(
+              targetLevel: micLevel.clamp(0.0, 1.0).toDouble(),
+              color: _micLevelColor(
+                  hasTrack, isTrackEnabled, isSelfMuted, micLevel),
             ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: state.toggleMute,
+                  icon: Icon(
+                    isSelfMuted ? Icons.mic_off : Icons.mic,
+                    size: 16,
+                  ),
+                  label: Text(isSelfMuted ? "Unmute" : "Mute"),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Color(0xFF4F545C)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(
+                  Icons.analytics_outlined,
+                  color: Colors.lightBlueAccent,
+                ),
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const VoiceDiagnosticsScreen(),
+                    ),
+                  );
+                },
+                tooltip: "Voice diagnostics",
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.call_end, color: Colors.redAccent),
+                onPressed: () => state.leaveVoiceChannel(),
+                tooltip: "Leave voice channel",
+              ),
+            ],
           ),
         ],
       ),
@@ -1083,4 +1125,3 @@ class _AnimatedMicInputLevel extends StatelessWidget {
     );
   }
 }
-

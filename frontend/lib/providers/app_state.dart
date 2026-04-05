@@ -11,6 +11,8 @@ import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart' as media_kit;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+
 import '../models/chat_models.dart';
 import '../utils/ws_channel_factory.dart';
 
@@ -154,7 +156,8 @@ class AppState extends ChangeNotifier {
   int _nextLocalMessageId = -1;
 
   // Scrolling
-  final ScrollController scrollController = ScrollController();
+  final ItemScrollController itemScrollController = ItemScrollController();
+  final ItemPositionsListener itemPositionsListener = ItemPositionsListener.create();
 
   bool get isVoiceConnecting => _voiceConnecting;
   bool get isVoiceSignalConnected =>
@@ -3365,21 +3368,21 @@ class AppState extends ChangeNotifier {
 
   void scrollToMessage(int id) {
     final index = messages.indexWhere((m) => m.id == id);
-    if (index != -1 && scrollController.hasClients) {
-      final position = index * 60.0;
-      scrollController.animateTo(
-        position,
+    if (index != -1) {
+      itemScrollController.scrollTo(
+        index: index,
         duration: const Duration(milliseconds: 500),
         curve: Curves.easeInOut,
+        alignment: 0.1,
       );
     }
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (scrollController.hasClients) {
-        scrollController.animateTo(
-          scrollController.position.maxScrollExtent,
+      if (messages.isNotEmpty && itemScrollController.isAttached) {
+        itemScrollController.scrollTo(
+          index: messages.length - 1,
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         );
@@ -3608,10 +3611,10 @@ class AppState extends ChangeNotifier {
     _voiceSignalProcessingQueue = Future.value();
     _pendingVoicePings.clear();
     _localStream = null;
-    scrollController.dispose();
     _highlightTimer?.cancel();
     super.dispose();
   }
+
 }
 
 class _MicDiagnosticsSample {
