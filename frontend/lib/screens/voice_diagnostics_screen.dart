@@ -87,7 +87,83 @@ class VoiceDiagnosticsScreen extends StatelessWidget {
           const SizedBox(height: 12),
           _MetricCard(
             title: "Microphone",
+            trailing: state.isAudioInputDevicesLoading
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.grey,
+                    ),
+                  )
+                : IconButton(
+                    icon: const Icon(Icons.refresh, size: 16),
+                    onPressed: state.refreshAudioInputDevices,
+                    tooltip: "Refresh devices",
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    color: Colors.grey,
+                  ),
             children: [
+              if (state.audioInputDevices.isNotEmpty) ...[
+                const Text(
+                  "Input Device",
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Theme(
+                  data: Theme.of(context).copyWith(
+                    canvasColor: const Color(0xFF2F3136),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: state.audioInputDevices.any((d) =>
+                              d.deviceId == state.selectedAudioInputDeviceId)
+                          ? state.selectedAudioInputDeviceId
+                          : null,
+                      icon: state.isAudioInputSwitching
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.blueAccent,
+                              ),
+                            )
+                          : const Icon(Icons.keyboard_arrow_down,
+                              color: Colors.grey),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                      ),
+                      items: state.audioInputDevices.map((device) {
+                        return DropdownMenuItem<String>(
+                          value: device.deviceId,
+                          child: Text(
+                            device.label.isEmpty
+                                ? "Microphone (${device.deviceId})"
+                                : device.label,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: state.isAudioInputSwitching
+                          ? null
+                          : (id) {
+                              if (id != null) {
+                                state.selectAudioInputDevice(id);
+                              }
+                            },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               _MetricRow(
                 label: "Audio track",
                 value: state.hasLocalAudioTrack ? "Present" : "Missing",
