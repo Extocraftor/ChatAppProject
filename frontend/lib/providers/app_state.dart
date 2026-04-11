@@ -18,7 +18,7 @@ import '../utils/ws_channel_factory.dart';
 
 class AppState extends ChangeNotifier {
   static const String baseUrl = "http://150.230.149.68:8000";
-  static const String wsUrl = "ws://150.230.149.68:8000";
+  static const String wsUrl = "ws://150.230.149.68:8000/ws";
   // static const String baseUrl = "https://extochatapp.onrender.com";
   // static const String wsUrl = "wss://extochatapp.onrender.com/ws";
   static const int _musicBotUserId = -1;
