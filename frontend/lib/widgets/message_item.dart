@@ -306,19 +306,23 @@ class _MessageItemState extends State<MessageItem> {
                                     _openAttachmentUrl(context, attachmentUrl),
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
-                                  child: Image.network(
-                                    attachmentUrl,
-                                    fit: BoxFit.cover,
-                                    width: 320,
-                                    height: 220,
-                                    errorBuilder: (_, __, ___) => Container(
-                                      width: 320,
-                                      height: 80,
-                                      color: const Color(0xFF2F3136),
-                                      alignment: Alignment.center,
-                                      child: const Text(
-                                        "Unable to load image",
-                                        style: TextStyle(color: Colors.grey),
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 320,
+                                      maxHeight: 220,
+                                    ),
+                                    child: Image.network(
+                                      attachmentUrl,
+                                      fit: BoxFit.contain,
+                                      errorBuilder: (_, __, ___) => Container(
+                                        width: 320,
+                                        height: 80,
+                                        color: const Color(0xFF2F3136),
+                                        alignment: Alignment.center,
+                                        child: const Text(
+                                          "Unable to load image",
+                                          style: TextStyle(color: Colors.grey),
+                                        ),
                                       ),
                                     ),
                                   ),

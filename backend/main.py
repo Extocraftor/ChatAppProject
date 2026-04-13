@@ -405,7 +405,7 @@ class VoiceConnectionManager:
         if self.music_bot_presence.get(channel_id, False):
             return False
         self.music_bot_presence[channel_id] = True
-        self.music_bot_volumes.setdefault(channel_id, 1.0)
+        self.music_bot_volumes.setdefault(channel_id, 0.5)
         return True
 
     def remove_music_bot(self, channel_id: int) -> bool:
@@ -422,7 +422,7 @@ class VoiceConnectionManager:
         return normalized_volume
 
     def music_bot_volume(self, channel_id: int) -> float:
-        return self.music_bot_volumes.get(channel_id, 1.0)
+        return self.music_bot_volumes.get(channel_id, 0.5)
 
     def find_channel_for_user(self, user_id: int) -> int | None:
         for channel_id, channel_connections in self.active_connections.items():

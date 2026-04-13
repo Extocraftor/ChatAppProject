@@ -15,6 +15,8 @@ dependencies:
   url_launcher: ^6.3.1
   media_kit: ^1.1.11
   media_kit_libs_windows_audio: ^1.0.9
+  media_kit_libs_android_audio: ^1.0.0
+  media_kit_libs_ios_audio: ^1.0.0
   file_picker: ^10.3.10
   scrollable_positioned_list: ^0.3.8
 
