@@ -36,9 +36,26 @@ class Sidebar extends StatelessWidget {
             decoration: const BoxDecoration(
               border: Border(bottom: BorderSide(color: Color(0xFF202225))),
             ),
-            child: const Text(
-              "Harmony",
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    "Harmony",
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20, color: Colors.grey),
+                  onPressed: () async {
+                    final state = context.read<AppState>();
+                    await state.fetchChannels();
+                    await state.fetchVoiceChannels();
+                  },
+                  tooltip: "Refresh channels",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ],
             ),
           ),
           Expanded(

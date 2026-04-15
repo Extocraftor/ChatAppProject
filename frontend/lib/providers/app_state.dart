@@ -1618,6 +1618,16 @@ class AppState extends ChangeNotifier {
           _applyPinStateFromMessage(newMessage);
         }
         _scrollToBottom();
+        // Multiple delayed scroll attempts to handle different image loading speeds
+        if (newMessage.attachmentUrl != null) {
+          for (final delayMs in [300, 800, 1500, 3000]) {
+            Future.delayed(Duration(milliseconds: delayMs), () {
+              if (activeChannel?.id != null) {
+                _scrollToBottom();
+              }
+            });
+          }
+        }
       } else if (type == 'music_bot_notice') {
         final content = (payload['content'] ?? '').toString().trim();
         if (content.isNotEmpty) {

@@ -59,6 +59,7 @@ ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
 PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
+STOP_COMMAND_PATTERN = re.compile(r"^(?:stop|skip|clear)(?:\s+bot)?$", re.IGNORECASE)
 JOIN_COMMAND_PATTERN = re.compile(r"^join(?:\s+bot)?$", re.IGNORECASE)
 VOLUME_COMMAND_PATTERN = re.compile(
     r"^volume(?:\s+(?P<value>[0-9]+(?:\.[0-9]+)?%?))?$",
@@ -422,7 +423,7 @@ class VoiceConnectionManager:
         return normalized_volume
 
     def music_bot_volume(self, channel_id: int) -> float:
-        return self.music_bot_volumes.get(channel_id, 0.5)
+        return self.music_bot_volumes.get(channel_id, 0.2)
 
     def find_channel_for_user(self, user_id: int) -> int | None:
         for channel_id, channel_connections in self.active_connections.items():
@@ -833,6 +834,37 @@ async def _handle_music_play_command(
         )
 
 
+async def _handle_music_stop_command(
+    channel_id: int,
+    user_id: int,
+    content: Any,
+) -> None:
+    if not isinstance(content, str):
+        return
+
+    if not STOP_COMMAND_PATTERN.match(content.strip()):
+        return
+
+    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+    if voice_channel_id is None:
+        await _send_music_bot_notice(
+            channel_id,
+            "Join a voice channel first, then use stop.",
+        )
+        return
+
+    music_playback_manager.clear_channel(voice_channel_id)
+    await voice_manager.broadcast(
+        voice_channel_id,
+        {
+            "type": "music_play",
+            "stream_url": None,
+            "title": None,
+        },
+    )
+    await _send_music_bot_notice(channel_id, "Music stopped and queue cleared.")
+
+
 async def _handle_music_bot_command(
     channel_id: int,
     user_id: int,
@@ -841,6 +873,11 @@ async def _handle_music_bot_command(
     base_url: str | None = None,
 ) -> None:
     await _handle_music_join_command(
+        channel_id=channel_id,
+        user_id=user_id,
+        content=content,
+    )
+    await _handle_music_stop_command(
         channel_id=channel_id,
         user_id=user_id,
         content=content,
