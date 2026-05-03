@@ -319,6 +319,8 @@ class VoiceConnectionManager:
         self.usernames: Dict[int, Dict[int, str]] = {}
         # channel_id -> user_id -> muted state
         self.mute_states: Dict[int, Dict[int, bool]] = {}
+        # channel_id -> user_id -> screen share state
+        self.screen_share_states: Dict[int, Dict[int, bool]] = {}
         # channel_id -> whether the synthetic music bot participant is present
         self.music_bot_presence: Dict[int, bool] = {}
         # channel_id -> bot volume (0.0 to 5.0)
@@ -332,6 +334,8 @@ class VoiceConnectionManager:
             self.usernames[channel_id] = {}
         if channel_id not in self.mute_states:
             self.mute_states[channel_id] = {}
+        if channel_id not in self.screen_share_states:
+            self.screen_share_states[channel_id] = {}
 
         # If the same user reconnects quickly, close the stale socket first.
         existing_socket = self.active_connections[channel_id].get(user_id)
@@ -344,6 +348,7 @@ class VoiceConnectionManager:
         self.active_connections[channel_id][user_id] = websocket
         self.usernames[channel_id][user_id] = username
         self.mute_states[channel_id].setdefault(user_id, False)
+        self.screen_share_states[channel_id].setdefault(user_id, False)
 
     def disconnect(self, channel_id: int, user_id: int, websocket: WebSocket | None = None) -> bool:
         removed = False
@@ -369,16 +374,23 @@ class VoiceConnectionManager:
             self.mute_states[channel_id].pop(user_id, None)
             if not self.mute_states[channel_id]:
                 self.mute_states.pop(channel_id, None)
+
+        if channel_id in self.screen_share_states:
+            self.screen_share_states[channel_id].pop(user_id, None)
+            if not self.screen_share_states[channel_id]:
+                self.screen_share_states.pop(channel_id, None)
         return removed
 
     def participants(self, channel_id: int) -> List[Dict[str, Any]]:
         usernames = self.usernames.get(channel_id, {})
         mute_states = self.mute_states.get(channel_id, {})
+        screen_share_states = self.screen_share_states.get(channel_id, {})
         participants = [
             {
                 "user_id": user_id,
                 "username": usernames.get(user_id, f"User #{user_id}"),
                 "is_muted": mute_states.get(user_id, False),
+                "is_screen_sharing": screen_share_states.get(user_id, False),
                 "is_bot": False,
             }
             for user_id in usernames.keys()
@@ -389,6 +401,7 @@ class VoiceConnectionManager:
                     "user_id": MUSIC_BOT_USER_ID,
                     "username": MUSIC_BOT_USERNAME,
                     "is_muted": False,
+                    "is_screen_sharing": False,
                     "is_bot": True,
                 }
             )
@@ -398,6 +411,11 @@ class VoiceConnectionManager:
         if channel_id not in self.mute_states:
             self.mute_states[channel_id] = {}
         self.mute_states[channel_id][user_id] = is_muted
+
+    def update_screen_share_state(self, channel_id: int, user_id: int, is_screen_sharing: bool):
+        if channel_id not in self.screen_share_states:
+            self.screen_share_states[channel_id] = {}
+        self.screen_share_states[channel_id][user_id] = is_screen_sharing
 
     def has_real_participants(self, channel_id: int) -> bool:
         return bool(self.usernames.get(channel_id))
@@ -453,6 +471,7 @@ class VoiceConnectionManager:
         channel_connections = self.active_connections.pop(channel_id, {})
         self.usernames.pop(channel_id, None)
         self.mute_states.pop(channel_id, None)
+        self.screen_share_states.pop(channel_id, None)
         self.music_bot_presence.pop(channel_id, None)
         self.music_bot_volumes.pop(channel_id, None)
         for websocket in list(channel_connections.values()):
@@ -3152,6 +3171,7 @@ async def voice_websocket_endpoint(
             "user_id": user_id,
             "username": username,
             "is_muted": voice_manager.mute_states.get(voice_channel_id, {}).get(user_id, False),
+            "is_screen_sharing": voice_manager.screen_share_states.get(voice_channel_id, {}).get(user_id, False),
             "is_bot": False,
         },
         exclude_user_id=user_id,
@@ -3199,6 +3219,22 @@ async def voice_websocket_endpoint(
                         "type": "mute_state",
                         "user_id": user_id,
                         "is_muted": is_muted,
+                    },
+                )
+
+            elif msg_type == "screen_share_state":
+                is_screen_sharing = bool(data_json.get("is_screen_sharing", False))
+                voice_manager.update_screen_share_state(
+                    voice_channel_id,
+                    user_id,
+                    is_screen_sharing,
+                )
+                await voice_manager.broadcast(
+                    voice_channel_id,
+                    {
+                        "type": "screen_share_state",
+                        "user_id": user_id,
+                        "is_screen_sharing": is_screen_sharing,
                     },
                 )
 

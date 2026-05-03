@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -72,6 +73,7 @@ class MainLayout extends StatelessWidget {
                     ],
                   ),
                 ),
+                const _ScreenShareStage(),
                 Expanded(
                   child: ScrollablePositionedList.builder(
                     itemScrollController:
@@ -98,6 +100,181 @@ class MainLayout extends StatelessWidget {
     );
   }
 
+}
+
+class _ScreenShareStage extends StatelessWidget {
+  const _ScreenShareStage();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final currentUserId = state.currentUser?.id;
+    final tiles = <_ScreenShareTileData>[];
+
+    if (state.isScreenSharing &&
+        state.localScreenRenderer != null &&
+        currentUserId != null) {
+      tiles.add(
+        _ScreenShareTileData(
+          label: "${state.currentUser?.username ?? 'You'} (You)",
+          renderer: state.localScreenRenderer,
+          isLocal: true,
+        ),
+      );
+    }
+
+    final remoteUserIds = state.screenSharingUserIds
+        .where((userId) => userId != currentUserId)
+        .toList()
+      ..sort((a, b) {
+        final aName = state.voiceParticipants[a]?.username ?? "";
+        final bName = state.voiceParticipants[b]?.username ?? "";
+        return aName.toLowerCase().compareTo(bName.toLowerCase());
+      });
+
+    for (final userId in remoteUserIds) {
+      final participant = state.voiceParticipants[userId];
+      tiles.add(
+        _ScreenShareTileData(
+          label: participant?.username ?? "User #$userId",
+          renderer: state.remoteScreenRenderers[userId],
+          isLocal: false,
+        ),
+      );
+    }
+
+    if (tiles.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      height: 280,
+      color: const Color(0xFF202225),
+      padding: const EdgeInsets.all(12),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final tileWidth = tiles.length == 1
+              ? constraints.maxWidth
+              : (constraints.maxWidth * 0.72)
+                  .clamp(300.0, 560.0)
+                  .toDouble();
+          return ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: tiles.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            itemBuilder: (context, index) {
+              return SizedBox(
+                width: tileWidth,
+                child: _ScreenShareTile(data: tiles[index]),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ScreenShareTileData {
+  const _ScreenShareTileData({
+    required this.label,
+    required this.renderer,
+    required this.isLocal,
+  });
+
+  final String label;
+  final RTCVideoRenderer? renderer;
+  final bool isLocal;
+}
+
+class _ScreenShareTile extends StatelessWidget {
+  const _ScreenShareTile({required this.data});
+
+  final _ScreenShareTileData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final renderer = data.renderer;
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: ColoredBox(
+        color: Colors.black,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (renderer != null)
+              RTCVideoView(
+                renderer,
+                mirror: false,
+                objectFit:
+                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              )
+            else
+              const Center(
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            Positioned(
+              left: 10,
+              bottom: 10,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.62),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.screen_share,
+                        size: 14,
+                        color: Colors.white70,
+                      ),
+                      const SizedBox(width: 6),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 260),
+                        child: Text(
+                          data.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (data.isLocal)
+              Positioned(
+                right: 8,
+                top: 8,
+                child: IconButton(
+                  tooltip: "Stop sharing",
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.black.withOpacity(0.62),
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () => context.read<AppState>().stopScreenShare(),
+                  icon: const Icon(Icons.stop_screen_share),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _MessageSearchDialog extends StatefulWidget {

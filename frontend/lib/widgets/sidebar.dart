@@ -688,6 +688,14 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (widget.participant.isScreenSharing) ...[
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.screen_share,
+                      size: 14,
+                      color: Colors.lightBlueAccent,
+                    ),
+                  ],
                   if (_isExpanded)
                     Text(
                       "${min(500, (volume * 100).round())}%",
@@ -822,6 +830,12 @@ class _VoiceStatusPanel extends StatelessWidget {
         context.select<AppState, bool>((s) => s.hasLocalAudioTrack);
     final isTrackEnabled =
         context.select<AppState, bool>((s) => s.isLocalMicTrackEnabled);
+    final isScreenSharing =
+        context.select<AppState, bool>((s) => s.isScreenSharing);
+    final isScreenShareStarting =
+        context.select<AppState, bool>((s) => s.isScreenShareStarting);
+    final screenShareError =
+        context.select<AppState, String?>((s) => s.screenShareError);
 
     return Container(
       color: const Color(0xFF202225),
@@ -891,6 +905,50 @@ class _VoiceStatusPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: isScreenShareStarting
+                      ? null
+                      : () async {
+                          final success = await state.toggleScreenShare();
+                          if (!success &&
+                              context.mounted &&
+                              state.screenShareError != null) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(state.screenShareError!)),
+                            );
+                          }
+                        },
+                  icon: Icon(
+                    isScreenSharing
+                        ? Icons.stop_screen_share
+                        : Icons.screen_share,
+                    size: 16,
+                  ),
+                  label: Text(isScreenSharing ? "Stop" : "Share"),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: isScreenSharing
+                        ? Colors.redAccent
+                        : Colors.white,
+                    side: const BorderSide(color: Color(0xFF4F545C)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (screenShareError != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              screenShareError,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: Colors.redAccent),
+            ),
+          ],
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
               IconButton(
                 icon: const Icon(
                   Icons.analytics_outlined,

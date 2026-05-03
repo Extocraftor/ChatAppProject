@@ -59,9 +59,15 @@ class AppState extends ChangeNotifier {
   WebSocketChannel? _voiceSignalChannel;
   Timer? _voicePingTimer;
   MediaStream? _localStream;
+  MediaStream? _localScreenStream;
+  RTCVideoRenderer? _localScreenRenderer;
   final Map<int, RTCPeerConnection> _peerConnections = {};
   final Map<int, MediaStream> _remoteStreams = {};
+  final Map<int, MediaStream> _remoteScreenStreams = {};
   final Map<int, RTCVideoRenderer> _remoteAudioRenderers = {};
+  final Map<int, RTCVideoRenderer> _remoteScreenRenderers = {};
+  final Map<int, RTCRtpSender> _screenShareSenders = {};
+  final Set<int> _screenSharingUserIds = <int>{};
   final Map<int, double> _voiceParticipantVolumes = {};
   final AudioPlayer? _musicPlayer =
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows
@@ -79,11 +85,13 @@ class AppState extends ChangeNotifier {
   bool isSelfMuted = false;
   bool _voiceConnecting = false;
   bool _voiceJoinInProgress = false;
+  bool _screenShareStarting = false;
   bool _voiceShouldReconnect = false;
   Timer? _voiceReconnectTimer;
   VoiceChannel? _voiceReconnectChannel;
   int _voiceReconnectAttempt = 0;
   String? voiceError;
+  String? screenShareError;
   Timer? _voiceDiagnosticsTimer;
   bool _voiceDiagnosticsInFlight = false;
   final Map<int, DateTime> _pendingVoicePings = {};
@@ -187,6 +195,13 @@ class AppState extends ChangeNotifier {
   int get remoteStreamCount => _remoteStreams.length;
   Map<int, RTCVideoRenderer> get remoteAudioRenderers =>
       Map<int, RTCVideoRenderer>.unmodifiable(_remoteAudioRenderers);
+  RTCVideoRenderer? get localScreenRenderer => _localScreenRenderer;
+  Map<int, RTCVideoRenderer> get remoteScreenRenderers =>
+      Map<int, RTCVideoRenderer>.unmodifiable(_remoteScreenRenderers);
+  Set<int> get screenSharingUserIds =>
+      Set<int>.unmodifiable(_screenSharingUserIds);
+  bool get isScreenSharing => _localScreenStream != null;
+  bool get isScreenShareStarting => _screenShareStarting;
   Map<int, RTCPeerConnectionState> get peerConnectionStates =>
       Map.unmodifiable(_peerConnectionStates);
   bool get hasLocalAudioTrack =>
@@ -1932,6 +1947,13 @@ class AppState extends ChangeNotifier {
         voiceParticipants
           ..clear()
           ..addEntries(participants.map((p) => MapEntry(p.userId, p)));
+        _screenSharingUserIds
+          ..clear()
+          ..addAll(
+            participants
+                .where((participant) => participant.isScreenSharing)
+                .map((participant) => participant.userId),
+          );
         final participantIds = participants.map((p) => p.userId).toSet();
         _voiceParticipantVolumes.removeWhere(
           (userId, _) => !participantIds.contains(userId),
@@ -1944,6 +1966,11 @@ class AppState extends ChangeNotifier {
       if (type == 'participant_joined') {
         final participant = VoiceParticipant.fromJson(payload);
         voiceParticipants[participant.userId] = participant;
+        _setScreenShareStateForUser(
+          participant.userId,
+          participant.isScreenSharing,
+          notify: false,
+        );
 
         if (participant.userId != currentUser?.id && !participant.isBot) {
           await _createOfferForUser(participant.userId);
@@ -1958,6 +1985,7 @@ class AppState extends ChangeNotifier {
         if (userId is int) {
           voiceParticipants.remove(userId);
           _voiceParticipantVolumes.remove(userId);
+          _screenSharingUserIds.remove(userId);
           await _closePeerConnection(userId);
           notifyListeners();
         }
@@ -1971,6 +1999,23 @@ class AppState extends ChangeNotifier {
           final current = voiceParticipants[userId];
           if (current != null) {
             voiceParticipants[userId] = current.copyWith(isMuted: isMuted);
+          }
+          notifyListeners();
+        }
+        return;
+      }
+
+      if (type == 'screen_share_state') {
+        final userId = payload['user_id'];
+        if (userId is int) {
+          final isScreenSharing = payload['is_screen_sharing'] == true;
+          _setScreenShareStateForUser(
+            userId,
+            isScreenSharing,
+            notify: false,
+          );
+          if (!isScreenSharing && userId != currentUser?.id) {
+            await _clearRemoteScreenShare(userId, disposeStream: true);
           }
           notifyListeners();
         }
@@ -2177,6 +2222,7 @@ class AppState extends ChangeNotifier {
         await peerConnection.addTrack(track, _localStream!);
       }
     }
+    await _addLocalScreenTrackToPeer(remoteUserId, peerConnection);
 
     peerConnection.onIceCandidate = (candidate) {
       final candidateValue = candidate.candidate;
@@ -2196,20 +2242,35 @@ class AppState extends ChangeNotifier {
     };
 
     peerConnection.onTrack = (event) {
-      if (event.track.kind != 'audio') {
+      final trackKind = event.track.kind;
+      if (trackKind != 'audio' && trackKind != 'video') {
         return;
       }
 
       final remoteStream = event.streams.isNotEmpty
           ? event.streams.first
-          : _remoteStreams[remoteUserId];
+          : (trackKind == 'video'
+              ? _remoteScreenStreams[remoteUserId]
+              : _remoteStreams[remoteUserId]);
       if (remoteStream == null) {
         return;
       }
 
-      _remoteStreams[remoteUserId] = remoteStream;
-      unawaited(_attachRemoteAudioRenderer(remoteUserId, remoteStream));
+      if (trackKind == 'video') {
+        _remoteScreenStreams[remoteUserId] = remoteStream;
+        _setScreenShareStateForUser(remoteUserId, true, notify: false);
+        unawaited(_attachRemoteScreenRenderer(remoteUserId, remoteStream));
+      } else {
+        _remoteStreams[remoteUserId] = remoteStream;
+        unawaited(_attachRemoteAudioRenderer(remoteUserId, remoteStream));
+      }
       notifyListeners();
+    };
+
+    peerConnection.onRemoveTrack = (stream, track) {
+      if (track.kind == 'video') {
+        unawaited(_clearRemoteScreenShare(remoteUserId, disposeStream: true));
+      }
     };
 
     peerConnection.onConnectionState = (state) {
@@ -2235,7 +2296,7 @@ class AppState extends ChangeNotifier {
 
     final offer = await peerConnection.createOffer({
       'offerToReceiveAudio': true,
-      'offerToReceiveVideo': false,
+      'offerToReceiveVideo': true,
     });
 
     await peerConnection.setLocalDescription(offer);
@@ -2274,7 +2335,7 @@ class AppState extends ChangeNotifier {
 
     final answer = await peerConnection.createAnswer({
       'offerToReceiveAudio': true,
-      'offerToReceiveVideo': false,
+      'offerToReceiveVideo': true,
     });
 
     await peerConnection.setLocalDescription(answer);
@@ -2383,6 +2444,283 @@ class AppState extends ChangeNotifier {
     }
 
     signalChannel.sink.add(jsonEncode(payload));
+  }
+
+  Future<bool> toggleScreenShare() async {
+    if (isScreenSharing) {
+      await stopScreenShare();
+      return true;
+    }
+    return startScreenShare();
+  }
+
+  Future<bool> startScreenShare() async {
+    if (currentUser == null ||
+        activeVoiceChannel == null ||
+        _voiceSignalChannel == null) {
+      screenShareError = "Join a voice channel before sharing your screen.";
+      notifyListeners();
+      return false;
+    }
+
+    if (_screenShareStarting) {
+      return false;
+    }
+
+    if (_localScreenStream != null) {
+      return true;
+    }
+
+    _screenShareStarting = true;
+    screenShareError = null;
+    notifyListeners();
+
+    MediaStream? screenStream;
+    RTCVideoRenderer? renderer;
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        'audio': false,
+      });
+
+      final videoTracks = screenStream.getVideoTracks();
+      if (videoTracks.isEmpty) {
+        throw StateError("No screen video track was returned.");
+      }
+
+      final videoTrack = videoTracks.first;
+      videoTrack.onEnded = () {
+        unawaited(stopScreenShare());
+      };
+
+      renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      renderer.srcObject = screenStream;
+      try {
+        renderer.muted = true;
+      } catch (_) {
+        // Some platforms do not expose mute on local preview renderers.
+      }
+
+      _localScreenStream = screenStream;
+      _localScreenRenderer = renderer;
+      _setScreenShareStateForUser(
+        currentUser!.id,
+        true,
+        notify: false,
+      );
+      _sendVoiceSignal({
+        'type': 'screen_share_state',
+        'is_screen_sharing': true,
+      });
+
+      var failedUpdates = 0;
+      for (final entry in _peerConnections.entries.toList()) {
+        final remoteUserId = entry.key;
+        if (_isMusicBotParticipantId(remoteUserId)) {
+          continue;
+        }
+
+        try {
+          await _addLocalScreenTrackToPeer(remoteUserId, entry.value);
+          await _createOfferForUser(remoteUserId);
+        } catch (error, stackTrace) {
+          failedUpdates += 1;
+          debugPrint(
+            'screen share renegotiation failed for user $remoteUserId: $error',
+          );
+          debugPrintStack(stackTrace: stackTrace);
+        }
+      }
+
+      if (failedUpdates > 0) {
+        screenShareError =
+            "Screen sharing started, but $failedUpdates viewer connection(s) could not be updated.";
+      }
+
+      return true;
+    } catch (error, stackTrace) {
+      debugPrint('startScreenShare failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      screenShareError = "Unable to start screen sharing: $error";
+      if (renderer != null) {
+        try {
+          renderer.srcObject = null;
+          await renderer.dispose();
+        } catch (_) {
+          // Ignore renderer cleanup failures after a failed capture.
+        }
+      }
+      if (screenStream != null) {
+        for (final track in screenStream.getTracks()) {
+          track.onEnded = null;
+        }
+        await _disposeStreamSafely(screenStream);
+      }
+      _localScreenRenderer = null;
+      _localScreenStream = null;
+      _screenShareSenders.clear();
+      final selfId = currentUser?.id;
+      if (selfId != null) {
+        _setScreenShareStateForUser(selfId, false, notify: false);
+      }
+      return false;
+    } finally {
+      _screenShareStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> stopScreenShare({
+    bool notify = true,
+    bool broadcast = true,
+    bool renegotiate = true,
+  }) async {
+    if (_localScreenStream == null &&
+        _localScreenRenderer == null &&
+        _screenShareSenders.isEmpty &&
+        !_screenShareStarting) {
+      return;
+    }
+
+    _screenShareStarting = false;
+    screenShareError = null;
+    final senderEntries = _screenShareSenders.entries.toList();
+    _screenShareSenders.clear();
+
+    if (renegotiate) {
+      for (final entry in senderEntries) {
+        final peerConnection = _peerConnections[entry.key];
+        if (peerConnection == null) {
+          continue;
+        }
+
+        try {
+          await peerConnection.removeTrack(entry.value);
+        } catch (_) {
+          // The peer may already be closing; teardown continues below.
+        }
+
+        try {
+          await entry.value.dispose();
+        } catch (_) {
+          // Sender disposal is best-effort after removeTrack.
+        }
+      }
+    }
+
+    await _disposeLocalScreenCapture();
+
+    final selfId = currentUser?.id;
+    if (selfId != null) {
+      _setScreenShareStateForUser(selfId, false, notify: false);
+    }
+
+    if (broadcast) {
+      _sendVoiceSignal({
+        'type': 'screen_share_state',
+        'is_screen_sharing': false,
+      });
+    }
+
+    if (renegotiate) {
+      for (final remoteUserId in senderEntries.map((entry) => entry.key).toSet()) {
+        if (!_peerConnections.containsKey(remoteUserId)) {
+          continue;
+        }
+
+        try {
+          await _createOfferForUser(remoteUserId);
+        } catch (error, stackTrace) {
+          debugPrint(
+            'screen share stop renegotiation failed for user $remoteUserId: $error',
+          );
+          debugPrintStack(stackTrace: stackTrace);
+        }
+      }
+    }
+
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _addLocalScreenTrackToPeer(
+    int remoteUserId,
+    RTCPeerConnection peerConnection,
+  ) async {
+    if (_isMusicBotParticipantId(remoteUserId) ||
+        _screenShareSenders.containsKey(remoteUserId)) {
+      return;
+    }
+
+    final screenStream = _localScreenStream;
+    if (screenStream == null) {
+      return;
+    }
+
+    final videoTracks = screenStream.getVideoTracks();
+    if (videoTracks.isEmpty) {
+      return;
+    }
+
+    final sender = await peerConnection.addTrack(videoTracks.first, screenStream);
+    _screenShareSenders[remoteUserId] = sender;
+  }
+
+  void _setScreenShareStateForUser(
+    int userId,
+    bool isScreenSharing, {
+    bool notify = true,
+  }) {
+    if (isScreenSharing) {
+      _screenSharingUserIds.add(userId);
+    } else {
+      _screenSharingUserIds.remove(userId);
+    }
+
+    final participant = voiceParticipants[userId];
+    if (participant != null &&
+        participant.isScreenSharing != isScreenSharing) {
+      voiceParticipants[userId] = participant.copyWith(
+        isScreenSharing: isScreenSharing,
+      );
+    }
+
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _disposeLocalScreenCapture() async {
+    final renderer = _localScreenRenderer;
+    final screenStream = _localScreenStream;
+    _localScreenRenderer = null;
+    _localScreenStream = null;
+
+    if (screenStream != null) {
+      for (final track in screenStream.getTracks()) {
+        track.onEnded = null;
+      }
+    }
+
+    if (renderer != null) {
+      try {
+        renderer.srcObject = null;
+      } catch (_) {
+        // Ignore renderer detachment failures during teardown.
+      }
+
+      try {
+        await renderer.dispose();
+      } catch (_) {
+        // Ignore renderer disposal failures during teardown.
+      }
+    }
+
+    if (screenStream != null) {
+      await _disposeStreamSafely(screenStream);
+    }
   }
 
   Map<String, dynamic> _buildVoiceAudioConstraints() {
@@ -2550,10 +2888,16 @@ class AppState extends ChangeNotifier {
     _voiceConnecting = false;
     activeVoiceChannel = null;
     isSelfMuted = false;
+    screenShareError = null;
     _voiceConnectedAt = null;
     _queuedRemoteIceCandidates.clear();
     _remoteDescriptionReadyUsers.clear();
     _voiceSignalProcessingQueue = Future.value();
+    await stopScreenShare(
+      notify: false,
+      broadcast: false,
+      renegotiate: false,
+    );
     if (_inputTestUsesVoiceStream) {
       await stopInputTest(notify: false);
     }
@@ -2581,11 +2925,19 @@ class AppState extends ChangeNotifier {
     for (final userId in _remoteAudioRenderers.keys.toList()) {
       await _disposeRemoteAudioRenderer(userId);
     }
+    for (final userId in _remoteScreenRenderers.keys.toList()) {
+      await _disposeRemoteScreenRenderer(userId);
+    }
 
-    for (final stream in _remoteStreams.values.toSet()) {
+    final remoteStreamsToDispose = <MediaStream>{
+      ..._remoteStreams.values,
+      ..._remoteScreenStreams.values,
+    };
+    for (final stream in remoteStreamsToDispose) {
       await _disposeStreamSafely(stream);
     }
     _remoteStreams.clear();
+    _remoteScreenStreams.clear();
 
     final localStream = _localStream;
     _localStream = null;
@@ -2595,6 +2947,8 @@ class AppState extends ChangeNotifier {
 
     voiceParticipants.clear();
     _voiceParticipantVolumes.clear();
+    _screenSharingUserIds.clear();
+    _screenShareSenders.clear();
     _peerConnectionStates.clear();
 
     if (notify) {
@@ -2603,10 +2957,12 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _closePeerConnection(int remoteUserId) async {
+    _screenShareSenders.remove(remoteUserId);
     final peerConnection = _peerConnections.remove(remoteUserId);
     if (peerConnection != null) {
       peerConnection.onIceCandidate = null;
       peerConnection.onTrack = null;
+      peerConnection.onRemoveTrack = null;
       peerConnection.onConnectionState = null;
       await _closePeerConnectionSafely(peerConnection);
     }
@@ -2615,10 +2971,21 @@ class AppState extends ChangeNotifier {
     _queuedRemoteIceCandidates.remove(remoteUserId);
     _peerConnectionStates.remove(remoteUserId);
     await _disposeRemoteAudioRenderer(remoteUserId);
+    await _disposeRemoteScreenRenderer(remoteUserId);
+    _screenSharingUserIds.remove(remoteUserId);
 
+    final streamsToDispose = <MediaStream>{};
     final remoteStream = _remoteStreams.remove(remoteUserId);
     if (remoteStream != null) {
-      await _disposeStreamSafely(remoteStream);
+      streamsToDispose.add(remoteStream);
+    }
+    final remoteScreenStream = _remoteScreenStreams.remove(remoteUserId);
+    if (remoteScreenStream != null) {
+      streamsToDispose.add(remoteScreenStream);
+    }
+
+    for (final stream in streamsToDispose) {
+      await _disposeStreamSafely(stream);
     }
   }
 
@@ -2650,6 +3017,36 @@ class AppState extends ChangeNotifier {
       renderer,
       voiceParticipantVolumeFor(remoteUserId),
     );
+
+    if (shouldNotify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _attachRemoteScreenRenderer(
+    int remoteUserId,
+    MediaStream remoteStream,
+  ) async {
+    var renderer = _remoteScreenRenderers[remoteUserId];
+    var shouldNotify = false;
+
+    if (renderer == null) {
+      renderer = RTCVideoRenderer();
+      await renderer.initialize();
+      _remoteScreenRenderers[remoteUserId] = renderer;
+      shouldNotify = true;
+    }
+
+    final currentStream = renderer.srcObject;
+    if (currentStream == null || currentStream.id != remoteStream.id) {
+      renderer.srcObject = remoteStream;
+      try {
+        renderer.muted = true;
+      } catch (_) {
+        // Some platforms throw if mute toggling is unsupported.
+      }
+      shouldNotify = true;
+    }
 
     if (shouldNotify) {
       notifyListeners();
@@ -2712,6 +3109,46 @@ class AppState extends ChangeNotifier {
 
   Future<void> _disposeRemoteAudioRenderer(int remoteUserId) async {
     final renderer = _remoteAudioRenderers.remove(remoteUserId);
+    if (renderer == null) {
+      return;
+    }
+
+    try {
+      renderer.srcObject = null;
+    } catch (_) {
+      // Ignore renderer detachment failures during teardown.
+    }
+
+    try {
+      await renderer.dispose();
+    } catch (_) {
+      // Ignore renderer disposal failures during teardown.
+    }
+  }
+
+  Future<void> _clearRemoteScreenShare(
+    int remoteUserId, {
+    bool disposeStream = false,
+    bool notify = false,
+  }) async {
+    _setScreenShareStateForUser(remoteUserId, false, notify: false);
+    await _disposeRemoteScreenRenderer(remoteUserId);
+
+    final screenStream = _remoteScreenStreams.remove(remoteUserId);
+    if (disposeStream && screenStream != null) {
+      final audioStream = _remoteStreams[remoteUserId];
+      if (audioStream == null || audioStream.id != screenStream.id) {
+        await _disposeStreamSafely(screenStream);
+      }
+    }
+
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _disposeRemoteScreenRenderer(int remoteUserId) async {
+    final renderer = _remoteScreenRenderers.remove(remoteUserId);
     if (renderer == null) {
       return;
     }
@@ -3596,31 +4033,60 @@ class AppState extends ChangeNotifier {
     for (final peerConnection in _peerConnections.values) {
       peerConnection.onIceCandidate = null;
       peerConnection.onTrack = null;
+      peerConnection.onRemoveTrack = null;
       peerConnection.onConnectionState = null;
       unawaited(_closePeerConnectionSafely(peerConnection));
     }
 
-    for (final stream in _remoteStreams.values.toSet()) {
+    for (final stream in <MediaStream>{
+      ..._remoteStreams.values,
+      ..._remoteScreenStreams.values,
+    }) {
       unawaited(_disposeStreamSafely(stream));
     }
     for (final userId in _remoteAudioRenderers.keys.toList()) {
       unawaited(_disposeRemoteAudioRenderer(userId));
+    }
+    for (final userId in _remoteScreenRenderers.keys.toList()) {
+      unawaited(_disposeRemoteScreenRenderer(userId));
     }
 
     final localStream = _localStream;
     if (localStream != null) {
       unawaited(_disposeStreamSafely(localStream));
     }
+    final localScreenStream = _localScreenStream;
+    if (localScreenStream != null) {
+      for (final track in localScreenStream.getTracks()) {
+        track.onEnded = null;
+      }
+      unawaited(_disposeStreamSafely(localScreenStream));
+    }
+    final localScreenRenderer = _localScreenRenderer;
+    if (localScreenRenderer != null) {
+      try {
+        localScreenRenderer.srcObject = null;
+      } catch (_) {
+        // Ignore renderer detachment failures during app disposal.
+      }
+      unawaited(localScreenRenderer.dispose());
+    }
 
     _peerConnections.clear();
     _peerConnectionStates.clear();
     _remoteStreams.clear();
+    _remoteScreenStreams.clear();
     _remoteAudioRenderers.clear();
+    _remoteScreenRenderers.clear();
+    _screenShareSenders.clear();
+    _screenSharingUserIds.clear();
     _queuedRemoteIceCandidates.clear();
     _remoteDescriptionReadyUsers.clear();
     _voiceSignalProcessingQueue = Future.value();
     _pendingVoicePings.clear();
     _localStream = null;
+    _localScreenStream = null;
+    _localScreenRenderer = null;
     _highlightTimer?.cancel();
     super.dispose();
   }
