@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -116,6 +117,7 @@ class _ScreenShareStage extends StatelessWidget {
         currentUserId != null) {
       tiles.add(
         _ScreenShareTileData(
+          userId: currentUserId,
           label: "${state.currentUser?.username ?? 'You'} (You)",
           renderer: state.localScreenRenderer,
           isLocal: true,
@@ -136,6 +138,7 @@ class _ScreenShareStage extends StatelessWidget {
       final participant = state.voiceParticipants[userId];
       tiles.add(
         _ScreenShareTileData(
+          userId: userId,
           label: participant?.username ?? "User #$userId",
           renderer: state.remoteScreenRenderers[userId],
           isLocal: false,
@@ -177,11 +180,13 @@ class _ScreenShareStage extends StatelessWidget {
 
 class _ScreenShareTileData {
   const _ScreenShareTileData({
+    required this.userId,
     required this.label,
     required this.renderer,
     required this.isLocal,
   });
 
+  final int userId;
   final String label;
   final RTCVideoRenderer? renderer;
   final bool isLocal;
@@ -256,22 +261,179 @@ class _ScreenShareTile extends StatelessWidget {
                 ),
               ),
             ),
-            if (data.isLocal)
-              Positioned(
-                right: 8,
-                top: 8,
-                child: IconButton(
-                  tooltip: "Stop sharing",
-                  style: IconButton.styleFrom(
-                    backgroundColor: Colors.black.withOpacity(0.62),
-                    foregroundColor: Colors.white,
+            Positioned(
+              right: 8,
+              top: 8,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: "Full screen",
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(0.62),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: renderer == null
+                        ? null
+                        : () => _openScreenShareFullscreen(context, data),
+                    icon: const Icon(Icons.fullscreen),
                   ),
-                  onPressed: () => context.read<AppState>().stopScreenShare(),
-                  icon: const Icon(Icons.stop_screen_share),
-                ),
+                  if (data.isLocal) ...[
+                    const SizedBox(width: 6),
+                    IconButton(
+                      tooltip: "Stop sharing",
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.black.withOpacity(0.62),
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: () =>
+                          context.read<AppState>().stopScreenShare(),
+                      icon: const Icon(Icons.stop_screen_share),
+                    ),
+                  ],
+                ],
               ),
+            ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+void _openScreenShareFullscreen(
+  BuildContext context,
+  _ScreenShareTileData data,
+) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => _ScreenShareFullscreenPage(
+        userId: data.userId,
+        initialLabel: data.label,
+        isLocal: data.isLocal,
+      ),
+    ),
+  );
+}
+
+class _ScreenShareFullscreenPage extends StatefulWidget {
+  const _ScreenShareFullscreenPage({
+    required this.userId,
+    required this.initialLabel,
+    required this.isLocal,
+  });
+
+  final int userId;
+  final String initialLabel;
+  final bool isLocal;
+
+  @override
+  State<_ScreenShareFullscreenPage> createState() =>
+      _ScreenShareFullscreenPageState();
+}
+
+class _ScreenShareFullscreenPageState
+    extends State<_ScreenShareFullscreenPage> {
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  @override
+  void dispose() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final renderer =
+        widget.isLocal ? state.localScreenRenderer : state.remoteScreenRenderers[widget.userId];
+    final label = widget.isLocal
+        ? "${state.currentUser?.username ?? 'You'} (You)"
+        : state.voiceParticipants[widget.userId]?.username ??
+            widget.initialLabel;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (renderer != null)
+            RTCVideoView(
+              renderer,
+              mirror: false,
+              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+            )
+          else
+            const Center(
+              child: Text(
+                "Screen share ended",
+                style: TextStyle(color: Colors.white70),
+              ),
+            ),
+          Positioned(
+            left: 12,
+            top: 12,
+            right: 12,
+            child: SafeArea(
+              child: Row(
+                children: [
+                  IconButton(
+                    tooltip: "Close",
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(0.62),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.fullscreen_exit),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.62),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (widget.isLocal) ...[
+                    const SizedBox(width: 8),
+                    IconButton(
+                      tooltip: "Stop sharing",
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.black.withOpacity(0.62),
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: () =>
+                          context.read<AppState>().stopScreenShare(),
+                      icon: const Icon(Icons.stop_screen_share),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

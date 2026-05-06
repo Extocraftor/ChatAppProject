@@ -10,6 +10,19 @@ import '../screens/admin_permissions_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
 import 'screen_share_source_dialog.dart';
 
+List<Widget> _spacedActions(List<Widget> actions) {
+  if (actions.length <= 1) {
+    return actions;
+  }
+
+  return [
+    for (var index = 0; index < actions.length; index++) ...[
+      if (index > 0) const SizedBox(width: 8),
+      actions[index],
+    ],
+  ];
+}
+
 class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
 
@@ -328,10 +341,11 @@ class _TextChannelTile extends StatelessWidget {
         trailing: trailingActions.isEmpty
             ? null
             : SizedBox(
-                width: 28.0 * trailingActions.length,
+                width: (28.0 * trailingActions.length) +
+                    (8.0 * (trailingActions.length - 1)),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
-                  children: trailingActions,
+                  children: _spacedActions(trailingActions),
                 ),
               ),
       ),
@@ -470,10 +484,11 @@ class _VoiceChannelTile extends StatelessWidget {
         ),
       ];
       trailing = SizedBox(
-        width: 28.0 * activeActions.length,
+        width: (28.0 * activeActions.length) +
+            (8.0 * (activeActions.length - 1)),
         child: Row(
           mainAxisSize: MainAxisSize.min,
-          children: activeActions,
+          children: _spacedActions(activeActions),
         ),
       );
     } else if (canDeleteChannel || isAdmin) {
@@ -512,10 +527,11 @@ class _VoiceChannelTile extends StatelessWidget {
           ),
       ];
       trailing = SizedBox(
-        width: 28.0 * inactiveActions.length,
+        width: (28.0 * inactiveActions.length) +
+            (8.0 * (inactiveActions.length - 1)),
         child: Row(
           mainAxisSize: MainAxisSize.min,
-          children: inactiveActions,
+          children: _spacedActions(inactiveActions),
         ),
       );
     }
@@ -691,19 +707,23 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
                     ),
                   ),
                   if (widget.participant.isScreenSharing) ...[
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 8),
                     const Icon(
                       Icons.screen_share,
                       size: 14,
                       color: Colors.lightBlueAccent,
                     ),
                   ],
-                  if (_isExpanded)
+                  if (_isExpanded) ...[
+                    SizedBox(
+                      width: widget.participant.isScreenSharing ? 8 : 4,
+                    ),
                     Text(
                       "${min(500, (volume * 100).round())}%",
                       style: const TextStyle(fontSize: 11, color: Colors.grey),
                     ),
-                  const SizedBox(width: 4),
+                  ],
+                  const SizedBox(width: 6),
                   Icon(
                     _isExpanded ? Icons.expand_less : Icons.tune,
                     size: 14,
