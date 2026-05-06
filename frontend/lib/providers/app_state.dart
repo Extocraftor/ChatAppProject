@@ -22,6 +22,8 @@ class AppState extends ChangeNotifier {
   // static const String baseUrl = "https://extochatapp.onrender.com";
   // static const String wsUrl = "wss://extochatapp.onrender.com/ws";
   static const int _musicBotUserId = -1;
+  static const double _defaultVoiceParticipantVolume = 1.0;
+  static const double _defaultMusicBotVolume = 0.2;
 
   static const Map<String, dynamic> _rtcConfiguration = {
     'iceServers': [
@@ -296,23 +298,39 @@ class AppState extends ChangeNotifier {
 
   bool _isMusicBotParticipantId(int userId) => userId == _musicBotUserId;
 
+  double _defaultVolumeForParticipant(int userId) {
+    return _isMusicBotParticipantId(userId)
+        ? _defaultMusicBotVolume
+        : _defaultVoiceParticipantVolume;
+  }
+
   double voiceParticipantVolumeFor(int userId) {
-    return (_voiceParticipantVolumes[userId] ?? 1.0)
+    return (_voiceParticipantVolumes[userId] ??
+            _defaultVolumeForParticipant(userId))
         .clamp(0.0, 5.0)
         .toDouble();
   }
 
-  void setVoiceParticipantVolume(int userId, double volume) {
+  bool _storeVoiceParticipantVolume(int userId, double volume) {
     final normalized = volume.clamp(0.0, 5.0).toDouble();
     final previous = voiceParticipantVolumeFor(userId);
     if ((previous - normalized).abs() < 0.001) {
-      return;
+      return false;
     }
 
-    if ((normalized - 1.0).abs() < 0.001) {
+    final defaultVolume = _defaultVolumeForParticipant(userId);
+    if ((normalized - defaultVolume).abs() < 0.001) {
       _voiceParticipantVolumes.remove(userId);
     } else {
       _voiceParticipantVolumes[userId] = normalized;
+    }
+    return true;
+  }
+
+  void setVoiceParticipantVolume(int userId, double volume) {
+    final normalized = volume.clamp(0.0, 5.0).toDouble();
+    if (!_storeVoiceParticipantVolume(userId, normalized)) {
+      return;
     }
 
     if (_isMusicBotParticipantId(userId)) {
@@ -2027,6 +2045,11 @@ class AppState extends ChangeNotifier {
         return;
       }
 
+      if (type == 'music_stop') {
+        await _stopMusicPlayback();
+        return;
+      }
+
       if (type == 'music_volume') {
         await _handleMusicVolumeSignal(payload);
         return;
@@ -2060,13 +2083,23 @@ class AppState extends ChangeNotifier {
 
   Future<void> _handleMusicPlaySignal(Map<String, dynamic> payload) async {
     final streamUrl = payload['stream_url'];
+    if (streamUrl == null) {
+      await _stopMusicPlayback();
+      return;
+    }
+
     if (streamUrl is! String || streamUrl.isEmpty) {
       voiceError = "Music bot sent an invalid stream URL.";
       notifyListeners();
       return;
     }
     final trackId = _tryParseMusicTrackId(payload['track_id']);
-    final playbackVolume = voiceParticipantVolumeFor(_musicBotUserId);
+    final payloadVolume = _tryParseMusicVolume(payload['volume']);
+    if (payloadVolume != null) {
+      _storeVoiceParticipantVolume(_musicBotUserId, payloadVolume);
+    }
+    final playbackVolume =
+        payloadVolume ?? voiceParticipantVolumeFor(_musicBotUserId);
 
     _suppressMusicCompletionSignals = true;
     if (_isWindowsDesktop) {
@@ -2174,6 +2207,35 @@ class AppState extends ChangeNotifier {
       'type': 'music_track_ended',
       'track_id': trackId,
     });
+  }
+
+  Future<void> _stopMusicPlayback({
+    bool notify = true,
+    bool clearError = true,
+  }) async {
+    _activeMusicTrackId = null;
+    _suppressMusicCompletionSignals = true;
+    try {
+      if (_isWindowsDesktop) {
+        await _windowsMusicPlayer.stop();
+      } else {
+        await _musicPlayer!.stop();
+      }
+      if (clearError) {
+        voiceError = null;
+      }
+    } catch (error) {
+      debugPrint('music stop failed: $error');
+      if (clearError) {
+        voiceError = "Unable to stop music playback: $error";
+      }
+    } finally {
+      _suppressMusicCompletionSignals = false;
+    }
+
+    if (notify) {
+      notifyListeners();
+    }
   }
 
   Future<void> _applyMusicPlaybackVolume(double volume) async {
@@ -2938,14 +3000,7 @@ class AppState extends ChangeNotifier {
     }
     _resetVoiceDiagnostics();
     await _stopMicProbe();
-    _activeMusicTrackId = null;
-    _suppressMusicCompletionSignals = true;
-    if (_isWindowsDesktop) {
-      await _windowsMusicPlayer.stop();
-    } else {
-      await _musicPlayer!.stop();
-    }
-    _suppressMusicCompletionSignals = false;
+    await _stopMusicPlayback(notify: false, clearError: false);
 
     if (signalChannel != null) {
       await signalChannel.sink.close();

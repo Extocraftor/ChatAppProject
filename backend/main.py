@@ -67,6 +67,7 @@ VOLUME_COMMAND_PATTERN = re.compile(
 )
 MUSIC_BOT_USER_ID = -1
 MUSIC_BOT_USERNAME = "Music Bot"
+DEFAULT_MUSIC_BOT_VOLUME = 0.2
 MENTION_PATTERN = re.compile(r"(?<!\w)@([A-Za-z0-9_.-]{1,32})")
 MENTION_TRAILING_CHARS = ".,!?;:)]}"
 YOUTUBE_URL_PATTERN = re.compile(
@@ -424,7 +425,7 @@ class VoiceConnectionManager:
         if self.music_bot_presence.get(channel_id, False):
             return False
         self.music_bot_presence[channel_id] = True
-        self.music_bot_volumes.setdefault(channel_id, 0.5)
+        self.music_bot_volumes.setdefault(channel_id, DEFAULT_MUSIC_BOT_VOLUME)
         return True
 
     def remove_music_bot(self, channel_id: int) -> bool:
@@ -441,7 +442,7 @@ class VoiceConnectionManager:
         return normalized_volume
 
     def music_bot_volume(self, channel_id: int) -> float:
-        return self.music_bot_volumes.get(channel_id, 0.2)
+        return self.music_bot_volumes.get(channel_id, DEFAULT_MUSIC_BOT_VOLUME)
 
     def find_channel_for_user(self, user_id: int) -> int | None:
         for channel_id, channel_connections in self.active_connections.items():
@@ -577,6 +578,10 @@ async def _ensure_music_bot_joined_in_channel(voice_channel_id: int) -> bool:
     joined_now = voice_manager.ensure_music_bot_joined(voice_channel_id)
     if joined_now:
         await _broadcast_music_bot_joined(voice_channel_id)
+        await _broadcast_music_bot_volume(
+            voice_channel_id,
+            voice_manager.music_bot_volume(voice_channel_id),
+        )
     return joined_now
 
 
@@ -876,9 +881,7 @@ async def _handle_music_stop_command(
     await voice_manager.broadcast(
         voice_channel_id,
         {
-            "type": "music_play",
-            "stream_url": None,
-            "title": None,
+            "type": "music_stop",
         },
     )
     await _send_music_bot_notice(channel_id, "Music stopped and queue cleared.")
