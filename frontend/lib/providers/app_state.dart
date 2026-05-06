@@ -2446,15 +2446,15 @@ class AppState extends ChangeNotifier {
     signalChannel.sink.add(jsonEncode(payload));
   }
 
-  Future<bool> toggleScreenShare() async {
+  Future<bool> toggleScreenShare({DesktopCapturerSource? source}) async {
     if (isScreenSharing) {
       await stopScreenShare();
       return true;
     }
-    return startScreenShare();
+    return startScreenShare(source: source);
   }
 
-  Future<bool> startScreenShare() async {
+  Future<bool> startScreenShare({DesktopCapturerSource? source}) async {
     if (currentUser == null ||
         activeVoiceChannel == null ||
         _voiceSignalChannel == null) {
@@ -2471,6 +2471,12 @@ class AppState extends ChangeNotifier {
       return true;
     }
 
+    if (WebRTC.platformIsDesktop && source == null) {
+      screenShareError = "Choose a screen or window before sharing.";
+      notifyListeners();
+      return false;
+    }
+
     _screenShareStarting = true;
     screenShareError = null;
     notifyListeners();
@@ -2478,10 +2484,9 @@ class AppState extends ChangeNotifier {
     MediaStream? screenStream;
     RTCVideoRenderer? renderer;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({
-        'video': true,
-        'audio': false,
-      });
+      screenStream = await navigator.mediaDevices.getDisplayMedia(
+        _screenShareConstraints(source),
+      );
 
       final videoTracks = screenStream.getVideoTracks();
       if (videoTracks.isEmpty) {
@@ -2542,7 +2547,7 @@ class AppState extends ChangeNotifier {
     } catch (error, stackTrace) {
       debugPrint('startScreenShare failed: $error');
       debugPrintStack(stackTrace: stackTrace);
-      screenShareError = "Unable to start screen sharing: $error";
+      screenShareError = _screenShareStartError(error);
       if (renderer != null) {
         try {
           renderer.srcObject = null;
@@ -2569,6 +2574,36 @@ class AppState extends ChangeNotifier {
       _screenShareStarting = false;
       notifyListeners();
     }
+  }
+
+  Map<String, dynamic> _screenShareConstraints(
+    DesktopCapturerSource? source,
+  ) {
+    if (source == null) {
+      return {
+        'video': true,
+        'audio': false,
+      };
+    }
+
+    return {
+      'video': {
+        'deviceId': {'exact': source.id},
+        'mandatory': {'frameRate': 30.0},
+      },
+      'audio': false,
+    };
+  }
+
+  String _screenShareStartError(Object error) {
+    final message = error.toString();
+    if (message.contains('source not found')) {
+      return "The selected screen or window is no longer available. Choose another source and try again.";
+    }
+    if (message.contains('Permission') || message.contains('permission')) {
+      return "Screen sharing permission was denied.";
+    }
+    return "Unable to start screen sharing: $message";
   }
 
   Future<void> stopScreenShare({

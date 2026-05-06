@@ -1,12 +1,14 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
 import '../screens/admin_permissions_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
+import 'screen_share_source_dialog.dart';
 
 class Sidebar extends StatelessWidget {
   const Sidebar({super.key});
@@ -816,6 +818,40 @@ class _VoiceStatusPanel extends StatelessWidget {
     return Colors.blueAccent;
   }
 
+  Future<void> _handleScreenSharePressed(
+    BuildContext context,
+    bool isScreenSharing,
+  ) async {
+    final state = context.read<AppState>();
+    if (isScreenSharing) {
+      await state.stopScreenShare();
+      return;
+    }
+
+    DesktopCapturerSource? source;
+    if (WebRTC.platformIsDesktop) {
+      source = await showDialog<DesktopCapturerSource>(
+        context: context,
+        builder: (_) => const ScreenShareSourceDialog(),
+      );
+      if (!context.mounted || source == null) {
+        return;
+      }
+    }
+
+    final success = await context.read<AppState>().startScreenShare(
+          source: source,
+        );
+    if (!success && context.mounted) {
+      final error = context.read<AppState>().screenShareError;
+      if (error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error)),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.read<AppState>();
@@ -905,34 +941,53 @@ class _VoiceStatusPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: isScreenShareStarting
-                      ? null
-                      : () async {
-                          final success = await state.toggleScreenShare();
-                          if (!success &&
-                              context.mounted &&
-                              state.screenShareError != null) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(state.screenShareError!)),
-                            );
-                          }
-                        },
-                  icon: Icon(
-                    isScreenSharing
-                        ? Icons.stop_screen_share
-                        : Icons.screen_share,
-                    size: 16,
-                  ),
-                  label: Text(isScreenSharing ? "Stop" : "Share"),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: isScreenSharing
-                        ? Colors.redAccent
-                        : Colors.white,
-                    side: const BorderSide(color: Color(0xFF4F545C)),
-                  ),
-                ),
+              _VoicePanelIconAction(
+                tooltip:
+                    isScreenSharing ? "Stop screen share" : "Share screen",
+                onPressed: isScreenShareStarting
+                    ? null
+                    : () => _handleScreenSharePressed(
+                          context,
+                          isScreenSharing,
+                        ),
+                foregroundColor:
+                    isScreenSharing ? Colors.redAccent : Colors.white,
+                child: isScreenShareStarting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Colors.white54),
+                        ),
+                      )
+                    : Icon(
+                        isScreenSharing
+                            ? Icons.stop_screen_share
+                            : Icons.screen_share,
+                        size: 18,
+                      ),
+              ),
+              const SizedBox(width: 6),
+              _VoicePanelIconAction(
+                tooltip: "Voice diagnostics",
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const VoiceDiagnosticsScreen(),
+                    ),
+                  );
+                },
+                foregroundColor: Colors.lightBlueAccent,
+                child: const Icon(Icons.analytics_outlined, size: 18),
+              ),
+              const SizedBox(width: 6),
+              _VoicePanelIconAction(
+                tooltip: "Leave voice channel",
+                onPressed: () => state.leaveVoiceChannel(),
+                foregroundColor: Colors.redAccent,
+                child: const Icon(Icons.call_end, size: 18),
               ),
             ],
           ),
@@ -945,33 +1000,46 @@ class _VoiceStatusPanel extends StatelessWidget {
               style: const TextStyle(fontSize: 11, color: Colors.redAccent),
             ),
           ],
-          const SizedBox(height: 4),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              IconButton(
-                icon: const Icon(
-                  Icons.analytics_outlined,
-                  color: Colors.lightBlueAccent,
-                ),
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => const VoiceDiagnosticsScreen(),
-                    ),
-                  );
-                },
-                tooltip: "Voice diagnostics",
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                icon: const Icon(Icons.call_end, color: Colors.redAccent),
-                onPressed: () => state.leaveVoiceChannel(),
-                tooltip: "Leave voice channel",
-              ),
-            ],
-          ),
         ],
+      ),
+    );
+  }
+}
+
+class _VoicePanelIconAction extends StatelessWidget {
+  const _VoicePanelIconAction({
+    required this.tooltip,
+    required this.onPressed,
+    required this.child,
+    this.foregroundColor = Colors.white,
+  });
+
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final Widget child;
+  final Color foregroundColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 36,
+      height: 36,
+      child: Tooltip(
+        message: tooltip,
+        child: OutlinedButton(
+          onPressed: onPressed,
+          style: OutlinedButton.styleFrom(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size.square(36),
+            foregroundColor: foregroundColor,
+            disabledForegroundColor: Colors.white38,
+            side: const BorderSide(color: Color(0xFF4F545C)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+          child: child,
+        ),
       ),
     );
   }
