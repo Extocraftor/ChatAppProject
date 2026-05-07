@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart' as media_kit;
@@ -71,13 +70,8 @@ class AppState extends ChangeNotifier {
   final Map<int, RTCRtpSender> _screenShareSenders = {};
   final Set<int> _screenSharingUserIds = <int>{};
   final Map<int, double> _voiceParticipantVolumes = {};
-  final AudioPlayer? _musicPlayer =
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows
-      ? null
-      : AudioPlayer();
-  final media_kit.Player _windowsMusicPlayer = media_kit.Player();
-  StreamSubscription<void>? _musicPlayerCompletionSubscription;
-  StreamSubscription<bool>? _windowsMusicCompletedSubscription;
+  final media_kit.Player _musicPlayer = media_kit.Player();
+  StreamSubscription<bool>? _musicPlayerCompletionSubscription;
   int? _activeMusicTrackId;
   bool _suppressMusicCompletionSignals = false;
   final Map<int, List<RTCIceCandidate>> _queuedRemoteIceCandidates = {};
@@ -139,20 +133,12 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _inputTestRawStats = {};
 
   AppState() {
-    if (_isWindowsDesktop) {
-      _windowsMusicCompletedSubscription =
-          _windowsMusicPlayer.stream.completed.listen((completed) {
-        if (completed) {
-          _handleMusicTrackCompleted();
-        }
-      });
-    } else {
-      _musicPlayerCompletionSubscription = _musicPlayer!.onPlayerComplete.listen((
-        _,
-      ) {
+    _musicPlayerCompletionSubscription =
+        _musicPlayer.stream.completed.listen((completed) {
+      if (completed) {
         _handleMusicTrackCompleted();
-      });
-    }
+      }
+    });
   }
 
   bool get _isWindowsDesktop =>
@@ -2102,56 +2088,22 @@ class AppState extends ChangeNotifier {
         payloadVolume ?? voiceParticipantVolumeFor(_musicBotUserId);
 
     _suppressMusicCompletionSignals = true;
-    if (_isWindowsDesktop) {
-      try {
-        await _windowsMusicPlayer.stop();
-        await _windowsMusicPlayer.open(
-          media_kit.Media(streamUrl),
-          play: true,
-        );
-        await _applyMusicPlaybackVolume(playbackVolume);
-        _activeMusicTrackId = trackId;
-        voiceError = null;
-        notifyListeners();
-      } catch (error) {
-        debugPrint(
-          'music playback failed (windows media_kit): streamUrl=$streamUrl error=$error',
-        );
-        _activeMusicTrackId = null;
-        voiceError = "Unable to start music playback: $error";
-        notifyListeners();
-      } finally {
-        _suppressMusicCompletionSignals = false;
-      }
-      return;
-    }
-
-    final streamIsManifest =
-        payload['stream_is_manifest'] == true ||
-        _looksLikeManifestStreamUrl(streamUrl);
-    final mimeType = _resolveMusicStreamMimeType(streamUrl, streamIsManifest);
-
     try {
-      await _musicPlayer!.stop();
-      await _musicPlayer!.setSource(UrlSource(streamUrl, mimeType: mimeType));
+      await _musicPlayer.stop();
+      await _musicPlayer.open(
+        media_kit.Media(streamUrl),
+        play: true,
+      );
       await _applyMusicPlaybackVolume(playbackVolume);
-      await _musicPlayer!.resume();
       _activeMusicTrackId = trackId;
       voiceError = null;
       notifyListeners();
     } catch (error) {
       debugPrint(
-        'music playback failed: streamUrl=$streamUrl streamIsManifest=$streamIsManifest mimeType=$mimeType error=$error',
+        'music playback failed (media_kit): streamUrl=$streamUrl error=$error',
       );
       _activeMusicTrackId = null;
-      if (streamIsManifest &&
-          !kIsWeb &&
-          defaultTargetPlatform == TargetPlatform.windows) {
-        voiceError =
-            "Unable to play this stream on Windows. Try another track or source.";
-      } else {
-        voiceError = "Unable to start music playback: $error";
-      }
+      voiceError = "Unable to start music playback: $error";
       notifyListeners();
     } finally {
       _suppressMusicCompletionSignals = false;
@@ -2216,11 +2168,7 @@ class AppState extends ChangeNotifier {
     _activeMusicTrackId = null;
     _suppressMusicCompletionSignals = true;
     try {
-      if (_isWindowsDesktop) {
-        await _windowsMusicPlayer.stop();
-      } else {
-        await _musicPlayer!.stop();
-      }
+      await _musicPlayer.stop();
       if (clearError) {
         voiceError = null;
       }
@@ -2241,11 +2189,7 @@ class AppState extends ChangeNotifier {
   Future<void> _applyMusicPlaybackVolume(double volume) async {
     final normalized = volume.clamp(0.0, 5.0).toDouble();
     try {
-      if (_isWindowsDesktop) {
-        await _windowsMusicPlayer.setVolume(normalized * 100.0);
-      } else {
-        await _musicPlayer!.setVolume(normalized.clamp(0.0, 1.0).toDouble());
-      }
+      await _musicPlayer.setVolume(normalized * 100.0);
     } catch (_) {
       // Ignore volume errors on platforms/backends that don't expose gain control.
     }
@@ -4097,9 +4041,7 @@ class AppState extends ChangeNotifier {
     _voiceReconnectTimer = null;
     _voiceSignalChannel?.sink.close();
     unawaited(_musicPlayerCompletionSubscription?.cancel() ?? Future.value());
-    unawaited(_windowsMusicCompletedSubscription?.cancel() ?? Future.value());
     _musicPlayerCompletionSubscription = null;
-    _windowsMusicCompletedSubscription = null;
     _activeMusicTrackId = null;
     _suppressMusicCompletionSignals = true;
     _voicePingTimer?.cancel();
@@ -4113,11 +4055,7 @@ class AppState extends ChangeNotifier {
     _inputTestTimer?.cancel();
     _inputTestTimer = null;
     unawaited(_stopMicProbe());
-    if (_isWindowsDesktop) {
-      unawaited(_windowsMusicPlayer.dispose());
-    } else {
-      unawaited(_musicPlayer!.dispose());
-    }
+    unawaited(_musicPlayer.dispose());
     unawaited(stopInputTest(notify: false));
 
     for (final peerConnection in _peerConnections.values) {
