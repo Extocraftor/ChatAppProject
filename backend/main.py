@@ -59,7 +59,8 @@ ROLE_MEMBER = "member"
 ROLE_MODERATOR = "moderator"
 ROLE_ADMIN = "admin"
 PLAY_COMMAND_PATTERN = re.compile(r"^play(?:\s+(?P<url>.+))?$", re.IGNORECASE)
-STOP_COMMAND_PATTERN = re.compile(r"^(?:stop|skip|clear)(?:\s+bot)?$", re.IGNORECASE)
+STOP_COMMAND_PATTERN = re.compile(r"^(?:stop|clear)(?:\s+bot)?$", re.IGNORECASE)
+SKIP_COMMAND_PATTERN = re.compile(r"^skip(?:\s+bot)?$", re.IGNORECASE)
 JOIN_COMMAND_PATTERN = re.compile(r"^join(?:\s+bot)?$", re.IGNORECASE)
 VOLUME_COMMAND_PATTERN = re.compile(
     r"^volume(?:\s+(?P<value>[0-9]+(?:\.[0-9]+)?%?))?$",
@@ -535,6 +536,25 @@ class MusicPlaybackStateManager:
         self.queued_tracks.pop(channel_id, None)
         return None
 
+    def current_track(self, channel_id: int) -> Dict[str, Any] | None:
+        return self.current_tracks.get(channel_id)
+
+    def skip_current(self, channel_id: int) -> Dict[str, Any] | None:
+        if channel_id not in self.current_tracks:
+            return None
+
+        queue = self.queued_tracks.get(channel_id, [])
+        if queue:
+            next_track = queue.pop(0)
+            self.current_tracks[channel_id] = next_track
+            if not queue:
+                self.queued_tracks.pop(channel_id, None)
+            return next_track
+
+        self.current_tracks.pop(channel_id, None)
+        self.queued_tracks.pop(channel_id, None)
+        return None
+
     def clear_channel(self, channel_id: int) -> None:
         self.current_tracks.pop(channel_id, None)
         self.queued_tracks.pop(channel_id, None)
@@ -602,6 +622,7 @@ async def _broadcast_music_playback_start(
 ) -> None:
     payload = dict(track_payload)
     payload.pop("notice_channel_id", None)
+    payload["volume"] = voice_manager.music_bot_volume(voice_channel_id)
     await voice_manager.broadcast(
         voice_channel_id,
         {
@@ -887,6 +908,48 @@ async def _handle_music_stop_command(
     await _send_music_bot_notice(channel_id, "Music stopped and queue cleared.")
 
 
+async def _handle_music_skip_command(
+    channel_id: int,
+    user_id: int,
+    content: Any,
+) -> None:
+    if not isinstance(content, str):
+        return
+
+    if not SKIP_COMMAND_PATTERN.match(content.strip()):
+        return
+
+    voice_channel_id = voice_manager.find_channel_for_user(user_id)
+    if voice_channel_id is None:
+        await _send_music_bot_notice(
+            channel_id,
+            "Join a voice channel first, then use skip.",
+        )
+        return
+
+    if music_playback_manager.current_track(voice_channel_id) is None:
+        await _send_music_bot_notice(channel_id, "No music is currently playing.")
+        return
+
+    next_track = music_playback_manager.skip_current(voice_channel_id)
+    if next_track is None:
+        await voice_manager.broadcast(
+            voice_channel_id,
+            {
+                "type": "music_stop",
+            },
+        )
+        await _send_music_bot_notice(channel_id, "Skipped. Queue is empty.")
+        return
+
+    await _broadcast_music_playback_start(voice_channel_id, next_track)
+    title = str(next_track.get("title") or "").strip()
+    if title:
+        await _send_music_bot_notice(channel_id, f"Skipped. Now playing: {title}")
+    else:
+        await _send_music_bot_notice(channel_id, "Skipped.")
+
+
 async def _handle_music_bot_command(
     channel_id: int,
     user_id: int,
@@ -900,6 +963,11 @@ async def _handle_music_bot_command(
         content=content,
     )
     await _handle_music_stop_command(
+        channel_id=channel_id,
+        user_id=user_id,
+        content=content,
+    )
+    await _handle_music_skip_command(
         channel_id=channel_id,
         user_id=user_id,
         content=content,
@@ -2498,8 +2566,8 @@ async def upload_channel_attachment(
     db.refresh(db_message)
 
     await manager.broadcast(
-        json.dumps(_serialize_message_payload(db_message, "new_message")),
         channel_id,
+        json.dumps(_serialize_message_payload(db_message, "new_message")),
     )
     return db_message
 
@@ -3248,6 +3316,25 @@ async def voice_websocket_endpoint(
                 except (TypeError, ValueError):
                     continue
                 await _advance_music_queue_after_completion(voice_channel_id, track_id)
+
+            elif msg_type == "music_volume":
+                raw_volume = data_json.get("volume")
+                try:
+                    requested_volume = float(raw_volume)
+                except (TypeError, ValueError):
+                    continue
+
+                if not voice_manager.music_bot_joined(voice_channel_id):
+                    continue
+
+                normalized_volume = voice_manager.set_music_bot_volume(
+                    voice_channel_id,
+                    requested_volume,
+                )
+                await _broadcast_music_bot_volume(
+                    voice_channel_id,
+                    normalized_volume,
+                )
 
             elif msg_type == "ping":
                 pong_payload: Dict[str, Any] = {"type": "pong"}

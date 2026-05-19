@@ -92,6 +92,7 @@ class AppState extends ChangeNotifier {
   bool _voiceDiagnosticsInFlight = false;
   final Map<int, DateTime> _pendingVoicePings = {};
   final Map<int, RTCPeerConnectionState> _peerConnectionStates = {};
+  final Map<int, Timer> _peerDisconnectTimers = {};
   int _voicePingSequence = 0;
   int? _voicePingMs;
   DateTime? _voiceConnectedAt;
@@ -313,7 +314,11 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
-  void setVoiceParticipantVolume(int userId, double volume) {
+  void setVoiceParticipantVolume(
+    int userId,
+    double volume, {
+    bool broadcastMusicVolume = true,
+  }) {
     final normalized = volume.clamp(0.0, 5.0).toDouble();
     if (!_storeVoiceParticipantVolume(userId, normalized)) {
       return;
@@ -321,6 +326,12 @@ class AppState extends ChangeNotifier {
 
     if (_isMusicBotParticipantId(userId)) {
       unawaited(_applyMusicPlaybackVolume(normalized));
+      if (broadcastMusicVolume) {
+        _sendVoiceSignal({
+          'type': 'music_volume',
+          'volume': normalized,
+        });
+      }
     } else {
       final renderer = _remoteAudioRenderers[userId];
       if (renderer != null) {
@@ -1452,6 +1463,8 @@ class AppState extends ChangeNotifier {
             if (uploadedMessage.isPinned) {
               _applyPinStateFromMessage(uploadedMessage);
             }
+          } else {
+            messages[existingIndex] = uploadedMessage;
           }
         } catch (_) {
           // Socket push will still update message list.
@@ -1460,6 +1473,13 @@ class AppState extends ChangeNotifier {
 
       replyingTo = null;
       attachmentUploadError = null;
+      if (activeChannel?.id == channelId) {
+        try {
+          await fetchMessages(channelId);
+        } catch (_) {
+          // The socket push and local append have already updated the channel.
+        }
+      }
       return true;
     } catch (_) {
       attachmentUploadError = "Unable to upload attachment";
@@ -1632,7 +1652,13 @@ class AppState extends ChangeNotifier {
 
       if (type == 'new_message') {
         final newMessage = Message.fromJson(payload);
-        messages.add(newMessage);
+        final existingIndex =
+            messages.indexWhere((message) => message.id == newMessage.id);
+        if (existingIndex == -1) {
+          messages.add(newMessage);
+        } else {
+          messages[existingIndex] = newMessage;
+        }
         if (newMessage.isPinned) {
           _applyPinStateFromMessage(newMessage);
         }
@@ -2117,7 +2143,11 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    setVoiceParticipantVolume(userId, normalizedVolume);
+    setVoiceParticipantVolume(
+      userId,
+      normalizedVolume,
+      broadcastMusicVolume: false,
+    );
   }
 
   int? _tryParseMusicTrackId(dynamic rawTrackId) {
@@ -2275,16 +2305,27 @@ class AppState extends ChangeNotifier {
 
     peerConnection.onRemoveTrack = (stream, track) {
       if (track.kind == 'video') {
-        unawaited(_clearRemoteScreenShare(remoteUserId, disposeStream: true));
+        unawaited(_clearRemoteScreenShare(
+          remoteUserId,
+          disposeStream: true,
+          clearSharingState: false,
+        ));
       }
     };
 
     peerConnection.onConnectionState = (state) {
       _peerConnectionStates[remoteUserId] = state;
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _schedulePeerDisconnectClose(remoteUserId);
+      } else {
+        _cancelPeerDisconnectTimer(remoteUserId);
+      }
+
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
-        unawaited(_closePeerConnection(remoteUserId));
+        unawaited(_closePeerConnection(remoteUserId).then((_) {
+          notifyListeners();
+        }));
       }
       notifyListeners();
     };
@@ -2934,6 +2975,7 @@ class AppState extends ChangeNotifier {
     _queuedRemoteIceCandidates.clear();
     _remoteDescriptionReadyUsers.clear();
     _voiceSignalProcessingQueue = Future.value();
+    _cancelAllPeerDisconnectTimers();
     await stopScreenShare(
       notify: false,
       broadcast: false,
@@ -2990,7 +3032,37 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void _schedulePeerDisconnectClose(int remoteUserId) {
+    if (_peerDisconnectTimers.containsKey(remoteUserId)) {
+      return;
+    }
+
+    _peerDisconnectTimers[remoteUserId] = Timer(const Duration(seconds: 8), () {
+      _peerDisconnectTimers.remove(remoteUserId);
+      if (_peerConnectionStates[remoteUserId] !=
+          RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        return;
+      }
+
+      unawaited(_closePeerConnection(remoteUserId).then((_) {
+        notifyListeners();
+      }));
+    });
+  }
+
+  void _cancelPeerDisconnectTimer(int remoteUserId) {
+    _peerDisconnectTimers.remove(remoteUserId)?.cancel();
+  }
+
+  void _cancelAllPeerDisconnectTimers() {
+    for (final timer in _peerDisconnectTimers.values) {
+      timer.cancel();
+    }
+    _peerDisconnectTimers.clear();
+  }
+
   Future<void> _closePeerConnection(int remoteUserId) async {
+    _cancelPeerDisconnectTimer(remoteUserId);
     _screenShareSenders.remove(remoteUserId);
     final peerConnection = _peerConnections.remove(remoteUserId);
     if (peerConnection != null) {
@@ -3164,8 +3236,11 @@ class AppState extends ChangeNotifier {
     int remoteUserId, {
     bool disposeStream = false,
     bool notify = false,
+    bool clearSharingState = true,
   }) async {
-    _setScreenShareStateForUser(remoteUserId, false, notify: false);
+    if (clearSharingState) {
+      _setScreenShareStateForUser(remoteUserId, false, notify: false);
+    }
     await _disposeRemoteScreenRenderer(remoteUserId);
 
     final screenStream = _remoteScreenStreams.remove(remoteUserId);
@@ -4054,6 +4129,7 @@ class AppState extends ChangeNotifier {
     _voiceDiagnosticsTimer = null;
     _inputTestTimer?.cancel();
     _inputTestTimer = null;
+    _cancelAllPeerDisconnectTimers();
     unawaited(_stopMicProbe());
     unawaited(_musicPlayer.dispose());
     unawaited(stopInputTest(notify: false));

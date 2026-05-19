@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../models/chat_models.dart';
 import '../providers/app_state.dart';
+import '../utils/local_file_loader.dart';
 
 class MessageInput extends StatefulWidget {
   const MessageInput({super.key});
@@ -16,13 +19,15 @@ class MessageInput extends StatefulWidget {
 
 class _MessageInputState extends State<MessageInput> {
   static const int _maxAttachmentBytes = 10 * 1024 * 1024;
+  static const MethodChannel _fileIntakeChannel =
+      MethodChannel('harmony/file_intake');
 
   final TextEditingController _controller = TextEditingController();
   final TextEditingController _emojiSearchController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   final FocusNode _emojiSearchFocusNode = FocusNode();
   final LayerLink _emojiPickerLayerLink = LayerLink();
-  PlatformFile? _selectedAttachment;
+  List<PlatformFile> _selectedAttachments = [];
   bool _showEmojiPicker = false;
   OverlayEntry? _emojiOverlayEntry;
 
@@ -123,6 +128,7 @@ class _MessageInputState extends State<MessageInput> {
     super.initState();
     _controller.addListener(_onComposerChanged);
     _emojiSearchController.addListener(_onEmojiSearchChanged);
+    _fileIntakeChannel.setMethodCallHandler(_handleFileIntakeCall);
   }
 
   void _onComposerChanged() {
@@ -161,7 +167,7 @@ class _MessageInputState extends State<MessageInput> {
     }
 
     if (editingMessage != null) {
-      if (_selectedAttachment != null) {
+      if (_selectedAttachments.isNotEmpty) {
         _showInlineError("Remove the attachment before editing this message");
         return;
       }
@@ -181,30 +187,44 @@ class _MessageInputState extends State<MessageInput> {
       return;
     }
 
-    final selectedAttachment = _selectedAttachment;
-    if (selectedAttachment != null) {
-      final Uint8List? attachmentBytes = selectedAttachment.bytes;
-      if (attachmentBytes == null || attachmentBytes.isEmpty) {
-        _showInlineError("Unable to read attachment data");
-        return;
-      }
+    final selectedAttachments = List<PlatformFile>.from(_selectedAttachments);
+    if (selectedAttachments.isNotEmpty) {
+      final parentId = state.replyingTo?.id;
+      for (var index = 0; index < selectedAttachments.length; index += 1) {
+        final selectedAttachment = selectedAttachments[index];
+        final Uint8List? attachmentBytes = selectedAttachment.bytes;
+        if (attachmentBytes == null || attachmentBytes.isEmpty) {
+          _showInlineError("Unable to read attachment data");
+          return;
+        }
 
-      final uploaded = await state.sendAttachmentMessage(
-        bytes: attachmentBytes,
-        filename: selectedAttachment.name,
-        content: content,
-        parentId: state.replyingTo?.id,
-      );
-      if (!uploaded) {
-        _showInlineError(state.attachmentUploadError ?? "Unable to upload attachment");
-        return;
+        final uploaded = await state.sendAttachmentMessage(
+          bytes: attachmentBytes,
+          filename: selectedAttachment.name,
+          content: index == 0 ? content : "",
+          parentId: parentId,
+        );
+        if (!uploaded) {
+          if (mounted) {
+            setState(() {
+              _selectedAttachments = selectedAttachments.sublist(index);
+            });
+          }
+          if (index > 0) {
+            _controller.clear();
+          }
+          _showInlineError(
+            state.attachmentUploadError ?? "Unable to upload attachment",
+          );
+          return;
+        }
       }
 
       if (!mounted) {
         return;
       }
       setState(() {
-        _selectedAttachment = null;
+        _selectedAttachments = [];
       });
       _controller.clear();
       state.setReplyingTo(null);
@@ -235,26 +255,33 @@ class _MessageInputState extends State<MessageInput> {
 
     try {
       final result = await FilePicker.platform.pickFiles(
-        allowMultiple: false,
+        allowMultiple: true,
         withData: true,
       );
       if (!mounted || result == null || result.files.isEmpty) {
         return;
       }
 
-      final file = result.files.first;
-      final bytes = file.bytes;
-      if (bytes == null || bytes.isEmpty) {
-        _showInlineError("Unable to read selected file");
-        return;
+      final files = <PlatformFile>[];
+      for (final file in result.files) {
+        final bytes = file.bytes;
+        if (bytes == null || bytes.isEmpty) {
+          _showInlineError("Unable to read selected file");
+          return;
+        }
+        if (bytes.length > _maxAttachmentBytes) {
+          _showInlineError("Attachment exceeds 10 MB limit");
+          return;
+        }
+        files.add(file);
       }
-      if (bytes.length > _maxAttachmentBytes) {
-        _showInlineError("Attachment exceeds 10 MB limit");
+
+      if (files.isEmpty) {
         return;
       }
 
       setState(() {
-        _selectedAttachment = file;
+        _selectedAttachments = [..._selectedAttachments, ...files];
       });
       if (_showEmojiPicker) {
         _closeEmojiPicker(requestKeyboard: true);
@@ -262,6 +289,123 @@ class _MessageInputState extends State<MessageInput> {
     } catch (_) {
       _showInlineError("Unable to pick attachment");
     }
+  }
+
+  Future<dynamic> _handleFileIntakeCall(MethodCall call) async {
+    if (call.method != 'filesDropped') {
+      return null;
+    }
+
+    final paths = _filePathsFromChannelArgument(call.arguments);
+    if (paths.isNotEmpty) {
+      await _addAttachmentsFromPaths(paths);
+    }
+    return null;
+  }
+
+  List<String> _filePathsFromChannelArgument(Object? argument) {
+    if (argument is! List) {
+      return const <String>[];
+    }
+
+    return argument
+        .whereType<String>()
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<bool> _tryAttachClipboardFiles() async {
+    try {
+      final result = await _fileIntakeChannel.invokeMethod<Object?>(
+        'readClipboardFiles',
+      );
+      final paths = _filePathsFromChannelArgument(result);
+      if (paths.isEmpty) {
+        return false;
+      }
+      await _addAttachmentsFromPaths(paths);
+      return true;
+    } on MissingPluginException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _addAttachmentsFromPaths(List<String> paths) async {
+    final state = context.read<AppState>();
+    if (state.editingMessage != null) {
+      _showInlineError("Attachments are disabled while editing a message");
+      return;
+    }
+    if (state.attachmentUploadInProgress) {
+      return;
+    }
+
+    final files = <PlatformFile>[];
+    for (final path in paths) {
+      final bytes = await readLocalFileBytes(path);
+      if (bytes == null || bytes.isEmpty) {
+        _showInlineError("Unable to read dropped file");
+        return;
+      }
+      if (bytes.length > _maxAttachmentBytes) {
+        _showInlineError("Attachment exceeds 10 MB limit");
+        return;
+      }
+
+      files.add(
+        PlatformFile(
+          name: basenameFromPath(path),
+          size: bytes.length,
+          bytes: bytes,
+          path: path,
+        ),
+      );
+    }
+
+    if (!mounted || files.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _selectedAttachments = [..._selectedAttachments, ...files];
+    });
+    if (_showEmojiPicker) {
+      _closeEmojiPicker(requestKeyboard: true);
+    }
+  }
+
+  Future<void> _handlePasteShortcut() async {
+    if (await _tryAttachClipboardFiles()) {
+      return;
+    }
+
+    final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = clipboardData?.text;
+    if (text == null || text.isEmpty) {
+      return;
+    }
+    _insertTextAtSelection(text);
+  }
+
+  void _insertTextAtSelection(String insertedText) {
+    final value = _controller.value;
+    final text = value.text;
+    final selection = value.selection;
+    final start = selection.start >= 0 ? selection.start : text.length;
+    final end = selection.end >= 0 ? selection.end : text.length;
+    final lowerBound = start < end ? start : end;
+    final upperBound = start > end ? start : end;
+    final updatedText = text.replaceRange(lowerBound, upperBound, insertedText);
+    final newCursorPosition = lowerBound + insertedText.length;
+
+    _controller.value = TextEditingValue(
+      text: updatedText,
+      selection: TextSelection.collapsed(offset: newCursorPosition),
+      composing: TextRange.empty,
+    );
   }
 
   void _showInlineError(String message) {
@@ -570,6 +714,7 @@ class _MessageInputState extends State<MessageInput> {
 
   @override
   void dispose() {
+    _fileIntakeChannel.setMethodCallHandler(null);
     _removeEmojiOverlay();
     _focusNode.dispose();
     _emojiSearchFocusNode.dispose();
@@ -590,14 +735,15 @@ class _MessageInputState extends State<MessageInput> {
     final attachmentUploadInProgress =
         context.select<AppState, bool>((s) => s.attachmentUploadInProgress);
 
-    final selectedAttachment = _selectedAttachment;
+    final selectedAttachments = _selectedAttachments;
     final mentionQuery = _activeMentionQuery();
     final mentionSuggestions = mentionQuery == null
         ? const <User>[]
         : context.read<AppState>().findMentionCandidates(mentionQuery.query);
     final showMentionSuggestions = mentionSuggestions.isNotEmpty;
     final hasReplyOrEditBanner = replyingTo != null || editingMessage != null;
-    final hasContextBanner = hasReplyOrEditBanner || selectedAttachment != null;
+    final hasContextBanner =
+        hasReplyOrEditBanner || selectedAttachments.isNotEmpty;
 
     if (editingMessage != null &&
         _controller.text != editingMessage.content &&
@@ -605,9 +751,25 @@ class _MessageInputState extends State<MessageInput> {
       _controller.text = editingMessage.content;
     }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Column(
+    return Shortcuts(
+      shortcuts: const <ShortcutActivator, Intent>{
+        SingleActivator(LogicalKeyboardKey.keyV, control: true):
+            _PasteFilesIntent(),
+        SingleActivator(LogicalKeyboardKey.keyV, meta: true):
+            _PasteFilesIntent(),
+      },
+      child: Actions(
+        actions: <Type, Action<Intent>>{
+          _PasteFilesIntent: CallbackAction<_PasteFilesIntent>(
+            onInvoke: (_) {
+              unawaited(_handlePasteShortcut());
+              return null;
+            },
+          ),
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (showMentionSuggestions)
@@ -680,7 +842,7 @@ class _MessageInputState extends State<MessageInput> {
                 ],
               ),
             ),
-          if (selectedAttachment != null)
+          if (selectedAttachments.isNotEmpty)
             Container(
               margin: const EdgeInsets.only(bottom: 0),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -688,41 +850,66 @@ class _MessageInputState extends State<MessageInput> {
                 color: Color(0xFF2F3136),
                 borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
               ),
-              child: Row(
-                children: [
-                  const Icon(Icons.attach_file, size: 16, color: Colors.grey),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      selectedAttachment.name,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  if (selectedAttachment.bytes != null) ...[
-                    const SizedBox(width: 8),
-                    Text(
-                      _formatByteCount(selectedAttachment.bytes!.length),
-                      style: const TextStyle(fontSize: 11, color: Colors.grey),
-                    ),
-                  ],
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 16, color: Colors.grey),
-                    onPressed: attachmentUploadInProgress
-                        ? null
-                        : () {
-                            setState(() {
-                              _selectedAttachment = null;
-                            });
-                          },
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                ],
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 132),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: selectedAttachments.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 6),
+                  itemBuilder: (context, index) {
+                    final attachment = selectedAttachments[index];
+                    return Row(
+                      children: [
+                        const Icon(
+                          Icons.attach_file,
+                          size: 16,
+                          color: Colors.grey,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            attachment.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        if (attachment.bytes != null) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            _formatByteCount(attachment.bytes!.length),
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(
+                            Icons.close,
+                            size: 16,
+                            color: Colors.grey,
+                          ),
+                          onPressed: attachmentUploadInProgress
+                              ? null
+                              : () {
+                                  setState(() {
+                                    _selectedAttachments = [
+                                      ...selectedAttachments.take(index),
+                                      ...selectedAttachments.skip(index + 1),
+                                    ];
+                                  });
+                                },
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
           CompositedTransformTarget(
@@ -794,11 +981,17 @@ class _MessageInputState extends State<MessageInput> {
             ),
           ),
           const SizedBox(height: 16),
-        ],
+          ],
+        ),
+        ),
       ),
     );
   }
 
+}
+
+class _PasteFilesIntent extends Intent {
+  const _PasteFilesIntent();
 }
 
 class _MentionQuery {

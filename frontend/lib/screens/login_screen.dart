@@ -12,6 +12,7 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _userController = TextEditingController();
   final TextEditingController _passController = TextEditingController();
+  final FocusNode _passwordFocusNode = FocusNode();
   bool _isRegistering = false;
   bool _isLoading = false;
 
@@ -67,6 +68,7 @@ class _LoginScreenState extends State<LoginScreen> {
   void dispose() {
     _userController.dispose();
     _passController.dispose();
+    _passwordFocusNode.dispose();
     super.dispose();
   }
 
@@ -99,6 +101,8 @@ class _LoginScreenState extends State<LoginScreen> {
               const SizedBox(height: 24),
               TextField(
                 controller: _userController,
+                textInputAction: TextInputAction.next,
+                onSubmitted: (_) => _passwordFocusNode.requestFocus(),
                 decoration: const InputDecoration(
                   labelText: "USERNAME",
                   filled: true,
@@ -109,7 +113,14 @@ class _LoginScreenState extends State<LoginScreen> {
               const SizedBox(height: 20),
               TextField(
                 controller: _passController,
+                focusNode: _passwordFocusNode,
                 obscureText: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) {
+                  if (!_isLoading) {
+                    _submit();
+                  }
+                },
                 decoration: const InputDecoration(
                   labelText: "PASSWORD",
                   filled: true,
