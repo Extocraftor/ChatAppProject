@@ -53,7 +53,7 @@ flutter::EncodableValue ClipboardFilePaths(HWND owner) {
     return flutter::EncodableValue(flutter::EncodableList());
   }
 
-  flutter::EncodableValue result(flutter::EncodableList());
+  flutter::EncodableValue result{flutter::EncodableList()};
   HANDLE clipboard_data = GetClipboardData(CF_HDROP);
   if (clipboard_data != nullptr) {
     result = FilePathListFromDrop(static_cast<HDROP>(clipboard_data));

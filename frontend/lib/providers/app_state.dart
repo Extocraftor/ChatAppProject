@@ -261,26 +261,12 @@ class AppState extends ChangeNotifier {
     return users.take(limit).toList();
   }
 
-  bool canDeleteTextChannel(Channel channel) {
-    final userId = currentUser?.id;
-    if (userId == null) {
-      return false;
-    }
-    if (canModerateChannels) {
-      return true;
-    }
-    return channel.creatorUserId != null && channel.creatorUserId == userId;
+  bool canDeleteTextChannel(Channel _) {
+    return canModerateChannels;
   }
 
-  bool canDeleteVoiceChannel(VoiceChannel channel) {
-    final userId = currentUser?.id;
-    if (userId == null) {
-      return false;
-    }
-    if (canModerateChannels) {
-      return true;
-    }
-    return channel.creatorUserId != null && channel.creatorUserId == userId;
+  bool canDeleteVoiceChannel(VoiceChannel _) {
+    return canModerateChannels;
   }
 
   bool _isMusicBotParticipantId(int userId) => userId == _musicBotUserId;

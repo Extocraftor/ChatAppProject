@@ -2474,13 +2474,10 @@ async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depe
     if not db_channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    can_delete = _is_staff(actor_user) or (
-        db_channel.creator_user_id is not None and db_channel.creator_user_id == actor_user.id
-    )
-    if not can_delete:
+    if not _is_staff(actor_user):
         raise HTTPException(
             status_code=403,
-            detail="Only moderators/admins or the channel creator can delete this channel",
+            detail="Only moderators/admins can delete this channel",
         )
 
     await manager.close_channel(channel_id)
@@ -2846,16 +2843,10 @@ async def delete_voice_channel(
     if not db_voice_channel:
         raise HTTPException(status_code=404, detail="Voice channel not found")
 
-    can_delete = _is_staff(actor_user) or (
-        db_voice_channel.creator_user_id is not None
-        and db_voice_channel.creator_user_id == actor_user.id
-    )
-    if not can_delete:
+    if not _is_staff(actor_user):
         raise HTTPException(
             status_code=403,
-            detail=(
-                "Only moderators/admins or the channel creator can delete this voice channel"
-            ),
+            detail="Only moderators/admins can delete this voice channel",
         )
 
     await voice_manager.close_channel(voice_channel_id)
