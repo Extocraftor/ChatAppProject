@@ -2041,7 +2041,7 @@ def _extract_youtube_stream(url: str, format_override: str | None = None) -> tup
         if configured_cookie_source and not saw_authenticated_bot_check_error and saw_format_unavailable_error:
             raise MusicExtractionError(
                 "Your YouTube cookies were used, but yt-dlp could not resolve a playable format. "
-                "Export fresh cookies, set MUSIC_BOT_YTDLP_COOKIES_B64 again, and restart backend."
+                "Export fresh cookies, update your configured cookie source, and restart backend."
             )
         if configured_po_token_source and configured_cookie_source:
             raise MusicExtractionError(
