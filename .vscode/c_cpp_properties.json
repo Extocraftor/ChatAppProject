@@ -3,12 +3,20 @@
         {
             "name": "Win32",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/frontend/windows",
+                "${workspaceFolder}/frontend/windows/runner",
+                "${workspaceFolder}/frontend/windows/flutter/ephemeral",
+                "${workspaceFolder}/frontend/windows/flutter/ephemeral/cpp_client_wrapper/include",
+                "${workspaceFolder}/frontend/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/windows",
+                "${workspaceFolder}/frontend/windows/flutter/ephemeral/.plugin_symlinks/media_kit_libs_windows_audio/windows/include",
+                "${workspaceFolder}/frontend/windows/flutter/ephemeral/.plugin_symlinks/media_kit_libs_windows_video/windows/include",
+                "${workspaceFolder}/frontend/windows/flutter/ephemeral/.plugin_symlinks/url_launcher_windows/windows/include"
             ],
             "defines": [
                 "_DEBUG",
                 "UNICODE",
-                "_UNICODE"
+                "_UNICODE",
+                "NOMINMAX"
             ],
             "windowsSdkVersion": "10.0.22000.0",
             "compilerPath": "cl.exe",
