@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart' as media_kit;
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -151,6 +155,25 @@ class _MessageItemState extends State<MessageItem> {
         name.endsWith('.bmp');
   }
 
+  bool _isVideoAttachment(Message message) {
+    final contentType = (message.attachmentContentType ?? '').toLowerCase();
+    if (contentType.startsWith('video/')) {
+      return true;
+    }
+
+    final name = (message.attachmentName ?? '').toLowerCase();
+    return name.endsWith('.mp4') ||
+        name.endsWith('.m4v') ||
+        name.endsWith('.mov') ||
+        name.endsWith('.webm') ||
+        name.endsWith('.mkv') ||
+        name.endsWith('.avi') ||
+        name.endsWith('.wmv') ||
+        name.endsWith('.mpeg') ||
+        name.endsWith('.mpg') ||
+        name.endsWith('.3gp');
+  }
+
   String _formatAttachmentSize(int? sizeBytes) {
     if (sizeBytes == null || sizeBytes <= 0) {
       return '';
@@ -184,6 +207,118 @@ class _MessageItemState extends State<MessageItem> {
     }
   }
 
+  void _showAttachmentPreview({
+    required BuildContext context,
+    required String url,
+    required bool isVideo,
+  }) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.86),
+      builder: (dialogContext) {
+        return _AttachmentPreviewDialog(
+          url: url,
+          title: widget.message.attachmentName ?? 'Attachment',
+          isVideo: isVideo,
+          onOpenExternal: () => _openAttachmentUrl(dialogContext, url),
+        );
+      },
+    );
+  }
+
+  Widget _buildImageAttachment(BuildContext context, String attachmentUrl) {
+    return _AttachmentFrame(
+      maxWidth: 320,
+      maxHeight: 220,
+      onOpenPreview: () => _showAttachmentPreview(
+        context: context,
+        url: attachmentUrl,
+        isVideo: false,
+      ),
+      child: Image.network(
+        attachmentUrl,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => const _AttachmentError(
+          icon: Icons.broken_image,
+          text: 'Unable to load image',
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVideoAttachment(BuildContext context, String attachmentUrl) {
+    return _AttachmentFrame(
+      maxWidth: 380,
+      maxHeight: 240,
+      onOpenPreview: () => _showAttachmentPreview(
+        context: context,
+        url: attachmentUrl,
+        isVideo: true,
+      ),
+      child: const AspectRatio(
+        aspectRatio: 16 / 9,
+        child: SizedBox.expand(),
+      ),
+      foreground: _AttachmentVideoPlayer(
+        url: attachmentUrl,
+        autoplay: false,
+      ),
+    );
+  }
+
+  Widget _buildFileAttachment(BuildContext context, String attachmentUrl) {
+    final attachmentSize = _formatAttachmentSize(widget.message.attachmentSize);
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: () => _openAttachmentUrl(context, attachmentUrl),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: 8,
+        ),
+        decoration: BoxDecoration(
+          color: const Color(0xFF2F3136),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: const Color(0xFF202225),
+          ),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.attach_file,
+              size: 16,
+              color: Colors.lightBlueAccent,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                widget.message.attachmentName ?? "Attachment",
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (attachmentSize.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              Text(
+                attachmentSize,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+            const SizedBox(width: 8),
+            const Icon(
+              Icons.open_in_new,
+              size: 15,
+              color: Colors.grey,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isHighlighted = context.select<AppState, bool>(
@@ -205,6 +340,8 @@ class _MessageItemState extends State<MessageItem> {
         : context.read<AppState>().resolveMediaUrl(attachmentPath);
     final hasImageAttachment =
         attachmentUrl != null && _isImageAttachment(widget.message);
+    final hasVideoAttachment =
+        attachmentUrl != null && _isVideoAttachment(widget.message);
     final hasTextContent = widget.message.content.trim().isNotEmpty;
 
     return MouseRegion(
@@ -301,88 +438,11 @@ class _MessageItemState extends State<MessageItem> {
                           if (attachmentUrl != null) ...[
                             if (hasTextContent) const SizedBox(height: 8),
                             if (hasImageAttachment)
-                              InkWell(
-                                onTap: () =>
-                                    _openAttachmentUrl(context, attachmentUrl),
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 320,
-                                      maxHeight: 220,
-                                    ),
-                                    child: Image.network(
-                                      attachmentUrl,
-                                      fit: BoxFit.contain,
-                                      errorBuilder: (_, __, ___) => Container(
-                                        width: 320,
-                                        height: 80,
-                                        color: const Color(0xFF2F3136),
-                                        alignment: Alignment.center,
-                                        child: const Text(
-                                          "Unable to load image",
-                                          style: TextStyle(color: Colors.grey),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              )
+                              _buildImageAttachment(context, attachmentUrl)
+                            else if (hasVideoAttachment)
+                              _buildVideoAttachment(context, attachmentUrl)
                             else
-                              InkWell(
-                                borderRadius: BorderRadius.circular(8),
-                                onTap: () =>
-                                    _openAttachmentUrl(context, attachmentUrl),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF2F3136),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                      color: const Color(0xFF202225),
-                                    ),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.attach_file,
-                                        size: 16,
-                                        color: Colors.lightBlueAccent,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Text(
-                                          widget.message.attachmentName ??
-                                              "Attachment",
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                      if (_formatAttachmentSize(
-                                              widget.message.attachmentSize)
-                                          .isNotEmpty) ...[
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          _formatAttachmentSize(
-                                              widget.message.attachmentSize),
-                                          style: const TextStyle(
-                                            color: Colors.grey,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      ],
-                                      const SizedBox(width: 8),
-                                      const Icon(
-                                        Icons.open_in_new,
-                                        size: 15,
-                                        color: Colors.grey,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
+                              _buildFileAttachment(context, attachmentUrl),
                           ],
                         ],
                       ),
@@ -461,4 +521,296 @@ class _MessageItemState extends State<MessageItem> {
     );
   }
 
+}
+
+class _AttachmentFrame extends StatelessWidget {
+  final Widget child;
+  final Widget? foreground;
+  final double maxWidth;
+  final double maxHeight;
+  final VoidCallback onOpenPreview;
+
+  const _AttachmentFrame({
+    required this.child,
+    required this.maxWidth,
+    required this.maxHeight,
+    required this.onOpenPreview,
+    this.foreground,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final content = ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: ColoredBox(
+        color: const Color(0xFF202225),
+        child: Stack(
+          fit: StackFit.passthrough,
+          children: [
+            child,
+            if (foreground != null) Positioned.fill(child: foreground!),
+          ],
+        ),
+      ),
+    );
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+      ),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onOpenPreview,
+          child: content,
+        ),
+      ),
+    );
+  }
+}
+
+class _AttachmentPreviewDialog extends StatelessWidget {
+  final String url;
+  final String title;
+  final bool isVideo;
+  final VoidCallback onOpenExternal;
+
+  const _AttachmentPreviewDialog({
+    required this.url,
+    required this.title,
+    required this.isVideo,
+    required this.onOpenExternal,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    return Dialog(
+      insetPadding: const EdgeInsets.all(24),
+      backgroundColor: Colors.transparent,
+      child: SizedBox(
+        width: screenSize.width * 0.92,
+        height: screenSize.height * 0.9,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xFF111214),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFF2F3136)),
+          ),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.open_in_new),
+                      tooltip: 'Open link',
+                      onPressed: onOpenExternal,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      tooltip: 'Close',
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1, color: Color(0xFF2F3136)),
+              Expanded(
+                child: isVideo
+                    ? _AttachmentVideoPlayer(
+                        url: url,
+                        autoplay: true,
+                      )
+                    : InteractiveViewer(
+                        minScale: 0.75,
+                        maxScale: 5,
+                        child: Center(
+                          child: Image.network(
+                            url,
+                            fit: BoxFit.contain,
+                            errorBuilder: (_, __, ___) =>
+                                const _AttachmentError(
+                              icon: Icons.broken_image,
+                              text: 'Unable to load image',
+                            ),
+                          ),
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AttachmentVideoPlayer extends StatefulWidget {
+  final String url;
+  final bool autoplay;
+
+  const _AttachmentVideoPlayer({
+    required this.url,
+    required this.autoplay,
+  });
+
+  @override
+  State<_AttachmentVideoPlayer> createState() => _AttachmentVideoPlayerState();
+}
+
+class _AttachmentVideoPlayerState extends State<_AttachmentVideoPlayer> {
+  late final media_kit.Player _player;
+  late final VideoController _controller;
+  StreamSubscription<String>? _errorSubscription;
+  bool _opening = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = media_kit.Player();
+    _controller = VideoController(_player);
+    _errorSubscription = _player.stream.error.listen((error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = error;
+        _opening = false;
+      });
+    });
+    _open();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AttachmentVideoPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url || oldWidget.autoplay != widget.autoplay) {
+      _open();
+    }
+  }
+
+  Future<void> _open() async {
+    setState(() {
+      _opening = true;
+      _error = null;
+    });
+
+    try {
+      await _player.open(
+        media_kit.Media(widget.url),
+        play: widget.autoplay,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _opening = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = error.toString();
+        _opening = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_errorSubscription?.cancel());
+    unawaited(_player.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Video(
+          controller: _controller,
+          fit: BoxFit.contain,
+        ),
+        if (_opening && _error == null)
+          const Center(
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        if (_error != null)
+          _AttachmentError(
+            icon: Icons.videocam_off,
+            text: 'Unable to play video',
+            detail: _error,
+          ),
+      ],
+    );
+  }
+}
+
+class _AttachmentError extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final String? detail;
+
+  const _AttachmentError({
+    required this.icon,
+    required this.text,
+    this.detail,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 320,
+      height: 96,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.all(12),
+      color: const Color(0xFF2F3136),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.grey, size: 22),
+          const SizedBox(height: 6),
+          Text(
+            text,
+            style: const TextStyle(color: Colors.grey),
+            textAlign: TextAlign.center,
+          ),
+          if (detail != null && detail!.trim().isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              detail!,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 11,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
