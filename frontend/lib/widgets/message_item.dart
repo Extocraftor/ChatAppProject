@@ -89,7 +89,23 @@ class _MessageItemState extends State<MessageItem> {
     }
   }
 
-  TextSpan _buildMessageContentSpan(Message message) {
+  String _mentionTokenWithoutTrailingPunctuation(String token) {
+    const trailingChars = '.,!?;:)]}';
+    var end = token.length;
+    while (end > 0 && trailingChars.contains(token[end - 1])) {
+      end -= 1;
+    }
+    return token.substring(0, end);
+  }
+
+  bool _isMentionBoundary(String character) {
+    return !RegExp(r'[A-Za-z0-9_]').hasMatch(character);
+  }
+
+  TextSpan _buildMessageContentSpan(
+    Message message,
+    Set<String> knownUsernames,
+  ) {
     const defaultStyle = TextStyle(color: Color(0xFFDCDDDE));
     final content = message.content;
     if (content.isEmpty) {
@@ -100,9 +116,16 @@ class _MessageItemState extends State<MessageItem> {
     final mentionNames = message.mentionedUsernames
         .map((name) => name.toLowerCase())
         .toSet();
+    if (mentionNames.isEmpty) {
+      mentionNames.addAll(knownUsernames);
+    }
     final spans = <TextSpan>[];
     var cursor = 0;
     for (final match in mentionPattern.allMatches(content)) {
+      if (match.start > 0 && !_isMentionBoundary(content[match.start - 1])) {
+        continue;
+      }
+
       if (match.start > cursor) {
         spans.add(
           TextSpan(
@@ -112,19 +135,40 @@ class _MessageItemState extends State<MessageItem> {
         );
       }
 
-      final mentionToken = (match.group(1) ?? '').toLowerCase();
-      final isMention = mentionNames.isEmpty || mentionNames.contains(mentionToken);
-      spans.add(
-        TextSpan(
-          text: content.substring(match.start, match.end),
-          style: isMention
-              ? const TextStyle(
-                  color: Colors.lightBlueAccent,
-                  fontWeight: FontWeight.w700,
-                )
-              : defaultStyle,
-        ),
+      final rawMentionToken = match.group(1) ?? '';
+      final mentionToken = _mentionTokenWithoutTrailingPunctuation(
+        rawMentionToken,
       );
+      final mentionTextEnd = match.start + 1 + mentionToken.length;
+      final isMention =
+          mentionToken.isNotEmpty && mentionNames.contains(mentionToken.toLowerCase());
+
+      if (isMention) {
+        spans.add(
+          TextSpan(
+            text: content.substring(match.start, mentionTextEnd),
+            style: const TextStyle(
+              color: Colors.lightBlueAccent,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        );
+        if (mentionTextEnd < match.end) {
+          spans.add(
+            TextSpan(
+              text: content.substring(mentionTextEnd, match.end),
+              style: defaultStyle,
+            ),
+          );
+        }
+      } else {
+        spans.add(
+          TextSpan(
+            text: content.substring(match.start, match.end),
+            style: defaultStyle,
+          ),
+        );
+      }
       cursor = match.end;
     }
 
@@ -328,6 +372,12 @@ class _MessageItemState extends State<MessageItem> {
     final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
     final canModerateChannels =
         context.select<AppState, bool>((s) => s.canModerateChannels);
+    final mentionableUsers =
+        context.select<AppState, List<User>>((s) => s.mentionableUsers);
+    final knownUsernames = mentionableUsers
+        .map((user) => user.username.trim().toLowerCase())
+        .where((username) => username.isNotEmpty)
+        .toSet();
 
     final isOwnMessage = currentUserId == widget.message.userId;
     final canDeleteAnyMessage = isAdmin;
@@ -433,7 +483,10 @@ class _MessageItemState extends State<MessageItem> {
                           ),
                           if (hasTextContent)
                             SelectableText.rich(
-                              _buildMessageContentSpan(widget.message),
+                              _buildMessageContentSpan(
+                                widget.message,
+                                knownUsernames,
+                              ),
                             ),
                           if (attachmentUrl != null) ...[
                             if (hasTextContent) const SizedBox(height: 8),

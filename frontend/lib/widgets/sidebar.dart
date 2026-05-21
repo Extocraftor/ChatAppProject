@@ -285,11 +285,52 @@ class _TextChannelTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final isActive = context.select<AppState, bool>(
         (s) => s.activeChannel?.id == channel.id);
+    final hasMention = context.select<AppState, bool>(
+        (s) => s.hasChannelMention(channel.id));
+    final hasActivity = context.select<AppState, bool>(
+        (s) => s.hasChannelActivity(channel.id));
     final canDeleteChannel = context.select<AppState, bool>(
         (s) => s.canDeleteTextChannel(channel));
     final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
+    final channelColor =
+        isActive || hasMention || hasActivity ? Colors.white : Colors.grey;
+    final symbolColor = isActive
+        ? Colors.white
+        : hasMention
+            ? Colors.redAccent
+            : hasActivity
+                ? Colors.lightBlueAccent
+                : Colors.grey;
+    final notificationBadge = hasMention
+        ? const Tooltip(
+            message: "Mention",
+            child: Icon(
+              Icons.alternate_email,
+              size: 17,
+              color: Colors.redAccent,
+            ),
+          )
+        : hasActivity
+            ? const Tooltip(
+                message: "Unread message",
+                child: SizedBox(
+                  width: 17,
+                  height: 17,
+                  child: Center(
+                    child: DecoratedBox(
+                      decoration: ShapeDecoration(
+                        color: Colors.lightBlueAccent,
+                        shape: CircleBorder(),
+                      ),
+                      child: SizedBox(width: 8, height: 8),
+                    ),
+                  ),
+                ),
+              )
+            : null;
 
     final trailingActions = <Widget>[
+      if (notificationBadge != null) notificationBadge,
       if (isAdmin)
         IconButton(
           icon: const Icon(
@@ -328,25 +369,22 @@ class _TextChannelTile extends StatelessWidget {
       type: MaterialType.transparency,
       child: ListTile(
         dense: true,
-        leading: const Text("#",
-            style: TextStyle(fontSize: 20, color: Colors.grey)),
+        leading: Text(
+          "#",
+          style: TextStyle(fontSize: 20, color: symbolColor),
+        ),
         title: Text(
           channel.name,
-          style: TextStyle(
-              color: isActive ? Colors.white : Colors.grey),
+          style: TextStyle(color: channelColor),
         ),
         onTap: () => context.read<AppState>().selectChannel(channel),
         selected: isActive,
         selectedTileColor: const Color(0xFF40444B),
         trailing: trailingActions.isEmpty
             ? null
-            : SizedBox(
-                width: (28.0 * trailingActions.length) +
-                    (8.0 * (trailingActions.length - 1)),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: _spacedActions(trailingActions),
-                ),
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: _spacedActions(trailingActions),
               ),
       ),
     );

@@ -311,6 +311,76 @@ class ConnectionManager:
                 pass
 
 
+class NotificationConnectionManager:
+    def __init__(self):
+        # Maps user_id to that user's active notification WebSockets.
+        self.active_connections: Dict[int, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = []
+        self.active_connections[user_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, user_id: int):
+        connections = self.active_connections.get(user_id)
+        if not connections:
+            return
+        if websocket in connections:
+            connections.remove(websocket)
+        if not connections:
+            self.active_connections.pop(user_id, None)
+
+    async def send_to_user(self, user_id: int, payload: Dict[str, Any]):
+        connections = self.active_connections.get(user_id, [])
+        for connection in list(connections):
+            try:
+                await connection.send_text(json.dumps(payload))
+            except Exception:
+                self.disconnect(connection, user_id)
+
+    async def notify_channel_message(self, db: Session, message: models.Message):
+        connected_user_ids = list(self.active_connections.keys())
+        if not connected_user_ids:
+            return
+
+        channel_id = int(message.channel_id)
+        message_id = int(message.id)
+        author_user_id = int(message.user_id)
+        mentioned_user_ids = message.mentioned_user_ids
+        mentioned_usernames = message.mentioned_usernames
+        timestamp = str(message.timestamp)
+        mentioned_user_id_set = set(mentioned_user_ids)
+
+        recipients = (
+            db.query(models.User)
+            .filter(models.User.id.in_(connected_user_ids))
+            .all()
+        )
+        for recipient in recipients:
+            recipient_user_id = int(recipient.id)
+            if recipient_user_id == author_user_id:
+                continue
+
+            _ensure_text_channel_permissions_for_user(db, recipient_user_id)
+            if not _can_view_text_channel(db, recipient, channel_id):
+                continue
+
+            await self.send_to_user(
+                recipient_user_id,
+                {
+                    "type": "channel_message",
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "author_user_id": author_user_id,
+                    "mentioned": recipient_user_id in mentioned_user_id_set,
+                    "mentioned_user_ids": mentioned_user_ids,
+                    "mentioned_usernames": mentioned_usernames,
+                    "timestamp": timestamp,
+                },
+            )
+
+
 # Connection manager for voice channels/WebRTC signaling
 class VoiceConnectionManager:
     def __init__(self):
@@ -547,6 +617,7 @@ class MusicPlaybackStateManager:
 
 
 manager = ConnectionManager()
+notification_manager = NotificationConnectionManager()
 voice_manager = VoiceConnectionManager()
 music_playback_manager = MusicPlaybackStateManager()
 
@@ -2543,6 +2614,7 @@ async def upload_channel_attachment(
         channel_id,
         json.dumps(_serialize_message_payload(db_message, "new_message")),
     )
+    await notification_manager.notify_channel_message(db, db_message)
     return db_message
 
 
@@ -2976,6 +3048,48 @@ async def audio_proxy(request: Request, url: str):
 # --- WEBSOCKET ENDPOINTS ---
 
 
+@app.websocket("/ws/notifications/{user_id}")
+async def notification_websocket_endpoint(
+    websocket: WebSocket,
+    user_id: int,
+    db: Session = Depends(get_db),
+):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        await websocket.close(code=1008)
+        return
+
+    await notification_manager.connect(websocket, user_id)
+
+    try:
+        while True:
+            data_str = await websocket.receive_text()
+            try:
+                data_json = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            if data_json.get("type") == "ping":
+                pong_payload: Dict[str, Any] = {"type": "pong"}
+                ping_id = data_json.get("ping_id")
+                if ping_id is not None:
+                    try:
+                        pong_payload["ping_id"] = int(ping_id)
+                    except (TypeError, ValueError):
+                        pass
+                await websocket.send_text(json.dumps(pong_payload))
+    except WebSocketDisconnect as disconnect_event:
+        logger.info(
+            "notification disconnect user=%s code=%s",
+            user_id,
+            disconnect_event.code,
+        )
+    except Exception:
+        logger.exception("notification websocket error user=%s", user_id)
+    finally:
+        notification_manager.disconnect(websocket, user_id)
+
+
 @app.websocket("/ws/{channel_id}/{user_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -3107,6 +3221,7 @@ async def websocket_endpoint(
 
                 await manager.broadcast(channel_id, broadcast_msg)
                 if msg_type == "new_message":
+                    await notification_manager.notify_channel_message(db, db_message)
                     base_url = _build_http_base_url_from_websocket(websocket)
                     await _handle_music_bot_command(
                         channel_id=channel_id,
@@ -3132,6 +3247,7 @@ async def websocket_endpoint(
                     _serialize_message_payload(db_message, "new_message")
                 )
                 await manager.broadcast(channel_id, broadcast_msg)
+                await notification_manager.notify_channel_message(db, db_message)
                 base_url = _build_http_base_url_from_websocket(websocket)
                 await _handle_music_bot_command(
                     channel_id=channel_id,

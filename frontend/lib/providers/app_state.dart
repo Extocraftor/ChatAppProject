@@ -37,6 +37,12 @@ class AppState extends ChangeNotifier {
   Timer? _textPingTimer;
   Timer? _textReconnectTimer;
   int _textReconnectAttempt = 0;
+  WebSocketChannel? _notificationChannel;
+  Timer? _notificationPingTimer;
+  Timer? _notificationReconnectTimer;
+  int _notificationReconnectAttempt = 0;
+  final Set<int> _channelsWithUnreadMessages = <int>{};
+  final Set<int> _channelsWithMentions = <int>{};
   List<Message> messages = [];
   List<Message> pinnedMessages = [];
   bool pinnedMessagesLoading = false;
@@ -226,6 +232,10 @@ class AppState extends ChangeNotifier {
     return role == "admin" || role == "moderator";
   }
   bool get canCreateChannels => canModerateChannels;
+  bool hasChannelActivity(int channelId) =>
+      _channelsWithUnreadMessages.contains(channelId);
+  bool hasChannelMention(int channelId) =>
+      _channelsWithMentions.contains(channelId);
 
   String resolveMediaUrl(String rawPathOrUrl) {
     final value = rawPathOrUrl.trim();
@@ -351,7 +361,10 @@ class AppState extends ChangeNotifier {
       );
 
       if (response.statusCode == 200) {
+        _disconnectNotificationSocket();
         currentUser = User.fromJson(jsonDecode(response.body));
+        _channelsWithUnreadMessages.clear();
+        _channelsWithMentions.clear();
         if (!isAdmin) {
           _clearAdminPermissionState(notify: false);
         }
@@ -359,6 +372,7 @@ class AppState extends ChangeNotifier {
         await fetchChannels();
         await fetchVoiceChannels();
         await refreshAudioInputDevices(notify: false);
+        _connectNotificationSocket();
         notifyListeners();
         return null;
       }
@@ -818,6 +832,7 @@ class AppState extends ChangeNotifier {
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       channels = data.map((c) => Channel.fromJson(c)).toList();
+      _pruneChannelNotifications(channels.map((channel) => channel.id).toSet());
 
       if (activeChannel != null) {
         final stillExists = channels.any((c) => c.id == activeChannel!.id);
@@ -859,6 +874,7 @@ class AppState extends ChangeNotifier {
         pinnedMessages = [];
         clearMessageSearch(notify: false);
       }
+      _clearChannelNotification(channelId, notify: false);
 
       await fetchChannels();
       return true;
@@ -1618,6 +1634,197 @@ class AppState extends ChangeNotifier {
     _textPingTimer = null;
   }
 
+  bool _pruneChannelNotifications(Set<int> visibleChannelIds) {
+    final unreadCount = _channelsWithUnreadMessages.length;
+    final mentionCount = _channelsWithMentions.length;
+    _channelsWithUnreadMessages
+        .removeWhere((channelId) => !visibleChannelIds.contains(channelId));
+    _channelsWithMentions
+        .removeWhere((channelId) => !visibleChannelIds.contains(channelId));
+    return unreadCount != _channelsWithUnreadMessages.length ||
+        mentionCount != _channelsWithMentions.length;
+  }
+
+  void _clearChannelNotification(int channelId, {bool notify = true}) {
+    final removedUnread = _channelsWithUnreadMessages.remove(channelId);
+    final removedMention = _channelsWithMentions.remove(channelId);
+    final changed = removedUnread || removedMention;
+    if (changed && notify) {
+      notifyListeners();
+    }
+  }
+
+  void _markChannelNotification(
+    int channelId, {
+    required bool mentioned,
+  }) {
+    var changed = false;
+    if (mentioned) {
+      changed = _channelsWithMentions.add(channelId) || changed;
+      changed = _channelsWithUnreadMessages.remove(channelId) || changed;
+    } else if (!_channelsWithMentions.contains(channelId)) {
+      changed = _channelsWithUnreadMessages.add(channelId) || changed;
+    }
+
+    if (changed) {
+      notifyListeners();
+    }
+  }
+
+  void _disconnectNotificationSocket() {
+    _notificationReconnectTimer?.cancel();
+    _notificationReconnectTimer = null;
+    _notificationReconnectAttempt = 0;
+    _stopNotificationPing();
+
+    final channel = _notificationChannel;
+    _notificationChannel = null;
+    if (channel != null) {
+      unawaited(channel.sink.close());
+    }
+  }
+
+  void _connectNotificationSocket() {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    final socket = createWsChannel(
+      Uri.parse("$wsUrl/notifications/$userId"),
+    );
+    _notificationChannel = socket;
+    _startNotificationPing();
+
+    socket.stream.listen(
+      _handleNotificationSocketData,
+      onDone: () => _handleNotificationSocketClosed(socket),
+      onError: (error) => _handleNotificationSocketClosed(socket, error: error),
+      cancelOnError: true,
+    );
+
+    unawaited(
+      socket.ready.then((_) {
+        if (!identical(_notificationChannel, socket)) {
+          return;
+        }
+        _notificationReconnectAttempt = 0;
+      }).catchError((_) {
+        // Stream callbacks handle reconnects.
+      }),
+    );
+  }
+
+  void _handleNotificationSocketClosed(
+    WebSocketChannel closedChannel, {
+    Object? error,
+  }) {
+    if (!identical(_notificationChannel, closedChannel)) {
+      return;
+    }
+
+    if (error != null) {
+      debugPrint("notification websocket closed with error: $error");
+    }
+
+    _notificationChannel = null;
+    _stopNotificationPing();
+
+    if (currentUser == null) {
+      return;
+    }
+
+    _scheduleNotificationReconnect();
+  }
+
+  void _scheduleNotificationReconnect() {
+    if (_notificationReconnectTimer != null) {
+      return;
+    }
+
+    final delay = _reconnectDelay(
+      attempt: _notificationReconnectAttempt,
+      minSeconds: 1,
+      maxSeconds: 20,
+    );
+    _notificationReconnectTimer = Timer(delay, () {
+      _notificationReconnectTimer = null;
+      if (currentUser == null) {
+        return;
+      }
+
+      _notificationReconnectAttempt += 1;
+      _connectNotificationSocket();
+    });
+  }
+
+  void _startNotificationPing() {
+    _notificationPingTimer?.cancel();
+    _sendNotificationPing();
+    _notificationPingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (_notificationChannel == null) {
+        _stopNotificationPing();
+        return;
+      }
+      _sendNotificationPing();
+    });
+  }
+
+  void _sendNotificationPing() {
+    final channel = _notificationChannel;
+    if (channel == null) {
+      return;
+    }
+
+    try {
+      channel.sink.add(jsonEncode({"type": "ping"}));
+    } catch (_) {
+      _scheduleNotificationReconnect();
+    }
+  }
+
+  void _stopNotificationPing() {
+    _notificationPingTimer?.cancel();
+    _notificationPingTimer = null;
+  }
+
+  void _handleNotificationSocketData(dynamic data) {
+    try {
+      final payload = Map<String, dynamic>.from(jsonDecode(data));
+      final type = payload['type']?.toString();
+      if (type == 'pong') {
+        return;
+      }
+      if (type != 'channel_message') {
+        return;
+      }
+
+      final userId = currentUser?.id;
+      final channelId = _tryParsePayloadInt(payload['channel_id']);
+      if (userId == null || channelId == null) {
+        return;
+      }
+
+      final authorUserId = _tryParsePayloadInt(payload['author_user_id']);
+      if (authorUserId == userId) {
+        return;
+      }
+
+      if (activeChannel?.id == channelId) {
+        _clearChannelNotification(channelId);
+        return;
+      }
+
+      final mentionedUserIds =
+          _parseMentionUserIds(payload['mentioned_user_ids']);
+      final mentioned =
+          payload['mentioned'] == true || mentionedUserIds.contains(userId);
+      _markChannelNotification(channelId, mentioned: mentioned);
+    } catch (_) {
+      // Ignore malformed notification payloads to keep the stream alive.
+    }
+  }
+
   void _handleTextSocketData(dynamic data) {
     try {
       final payload = Map<String, dynamic>.from(jsonDecode(data));
@@ -1727,6 +1934,7 @@ class AppState extends ChangeNotifier {
 
   void selectChannel(Channel channel) {
     activeChannel = channel;
+    _clearChannelNotification(channel.id, notify: false);
     messages = [];
     pinnedMessages = [];
     pinnedMessagesError = null;
@@ -4093,6 +4301,7 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _disconnectTextSocket();
+    _disconnectNotificationSocket();
     _voiceShouldReconnect = false;
     _voiceReconnectChannel = null;
     _voiceReconnectAttempt = 0;
