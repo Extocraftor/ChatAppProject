@@ -68,7 +68,6 @@ VOLUME_COMMAND_PATTERN = re.compile(
 )
 MUSIC_BOT_USER_ID = -1
 MUSIC_BOT_USERNAME = "Music Bot"
-DEFAULT_MUSIC_BOT_VOLUME = 0.2
 MENTION_PATTERN = re.compile(r"(?<!\w)@([A-Za-z0-9_.-]{1,32})")
 MENTION_TRAILING_CHARS = ".,!?;:)]}"
 YOUTUBE_URL_PATTERN = re.compile(
@@ -325,8 +324,6 @@ class VoiceConnectionManager:
         self.screen_share_states: Dict[int, Dict[int, bool]] = {}
         # channel_id -> whether the synthetic music bot participant is present
         self.music_bot_presence: Dict[int, bool] = {}
-        # channel_id -> bot volume (0.0 to 5.0)
-        self.music_bot_volumes: Dict[int, float] = {}
 
     async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
         await websocket.accept()
@@ -426,24 +423,14 @@ class VoiceConnectionManager:
         if self.music_bot_presence.get(channel_id, False):
             return False
         self.music_bot_presence[channel_id] = True
-        self.music_bot_volumes.setdefault(channel_id, DEFAULT_MUSIC_BOT_VOLUME)
         return True
 
     def remove_music_bot(self, channel_id: int) -> bool:
         removed = bool(self.music_bot_presence.pop(channel_id, None))
-        self.music_bot_volumes.pop(channel_id, None)
         return removed
 
     def music_bot_joined(self, channel_id: int) -> bool:
         return self.music_bot_presence.get(channel_id, False)
-
-    def set_music_bot_volume(self, channel_id: int, volume: float) -> float:
-        normalized_volume = max(0.0, min(5.0, float(volume)))
-        self.music_bot_volumes[channel_id] = normalized_volume
-        return normalized_volume
-
-    def music_bot_volume(self, channel_id: int) -> float:
-        return self.music_bot_volumes.get(channel_id, DEFAULT_MUSIC_BOT_VOLUME)
 
     def find_channel_for_user(self, user_id: int) -> int | None:
         for channel_id, channel_connections in self.active_connections.items():
@@ -475,7 +462,6 @@ class VoiceConnectionManager:
         self.mute_states.pop(channel_id, None)
         self.screen_share_states.pop(channel_id, None)
         self.music_bot_presence.pop(channel_id, None)
-        self.music_bot_volumes.pop(channel_id, None)
         for websocket in list(channel_connections.values()):
             try:
                 await websocket.close(code=1008)
@@ -587,6 +573,15 @@ def _music_bot_participant_payload() -> Dict[str, Any]:
     }
 
 
+def _music_volume_payload(target_user_id: int, volume: float) -> Dict[str, Any]:
+    return {
+        "type": "music_volume",
+        "user_id": MUSIC_BOT_USER_ID,
+        "target_user_id": target_user_id,
+        "volume": max(0.0, min(5.0, float(volume))),
+    }
+
+
 async def _broadcast_music_bot_joined(voice_channel_id: int) -> None:
     await voice_manager.broadcast(
         voice_channel_id,
@@ -598,22 +593,7 @@ async def _ensure_music_bot_joined_in_channel(voice_channel_id: int) -> bool:
     joined_now = voice_manager.ensure_music_bot_joined(voice_channel_id)
     if joined_now:
         await _broadcast_music_bot_joined(voice_channel_id)
-        await _broadcast_music_bot_volume(
-            voice_channel_id,
-            voice_manager.music_bot_volume(voice_channel_id),
-        )
     return joined_now
-
-
-async def _broadcast_music_bot_volume(voice_channel_id: int, volume: float) -> None:
-    await voice_manager.broadcast(
-        voice_channel_id,
-        {
-            "type": "music_volume",
-            "user_id": MUSIC_BOT_USER_ID,
-            "volume": volume,
-        },
-    )
 
 
 async def _broadcast_music_playback_start(
@@ -622,7 +602,6 @@ async def _broadcast_music_playback_start(
 ) -> None:
     payload = dict(track_payload)
     payload.pop("notice_channel_id", None)
-    payload["volume"] = voice_manager.music_bot_volume(voice_channel_id)
     await voice_manager.broadcast(
         voice_channel_id,
         {
@@ -746,10 +725,9 @@ async def _handle_music_volume_command(
 
     raw_value = (command_match.group("value") or "").strip()
     if not raw_value:
-        current_percent = round(voice_manager.music_bot_volume(voice_channel_id) * 100)
         await _send_music_bot_notice(
             channel_id,
-            f"Current music bot volume: {current_percent}%.",
+            "Music bot volume is local to each user. Use volume <0-500> to set it for yourself.",
         )
         return
 
@@ -767,16 +745,17 @@ async def _handle_music_volume_command(
         return
 
     await _ensure_music_bot_joined_in_channel(voice_channel_id)
-    normalized_volume = voice_manager.set_music_bot_volume(
+    normalized_volume = max(0.0, min(5.0, parsed_percent / 100.0))
+    await voice_manager.send_to_user(
         voice_channel_id,
-        parsed_percent / 100.0,
+        user_id,
+        _music_volume_payload(user_id, normalized_volume),
     )
-    await _broadcast_music_bot_volume(voice_channel_id, normalized_volume)
 
     display_percent = f"{parsed_percent:.2f}".rstrip("0").rstrip(".")
     await _send_music_bot_notice(
         channel_id,
-        f"Music bot volume set to {display_percent}%.",
+        f"Your music bot volume is set to {display_percent}%.",
     )
 
 
@@ -845,7 +824,6 @@ async def _handle_music_play_command(
         return
 
     await _ensure_music_bot_joined_in_channel(voice_channel_id)
-    current_music_bot_volume = voice_manager.music_bot_volume(voice_channel_id)
 
     # Construct proxy URL if base_url is provided.
     final_stream_url = stream_url
@@ -859,7 +837,6 @@ async def _handle_music_play_command(
             "source_url": raw_url,
             "stream_url": final_stream_url,
             "stream_is_manifest": _looks_like_manifest_url(stream_url),
-            "volume": current_music_bot_volume,
             "requested_by_user_id": user_id,
             "requested_by_username": username,
             "notice_channel_id": channel_id,
@@ -3215,16 +3192,6 @@ async def voice_websocket_endpoint(
             "participants": voice_manager.participants(voice_channel_id),
         },
     )
-    if voice_manager.music_bot_joined(voice_channel_id):
-        await voice_manager.send_to_user(
-            voice_channel_id,
-            user_id,
-            {
-                "type": "music_volume",
-                "user_id": MUSIC_BOT_USER_ID,
-                "volume": voice_manager.music_bot_volume(voice_channel_id),
-            },
-        )
 
     await voice_manager.broadcast(
         voice_channel_id,
@@ -3318,13 +3285,11 @@ async def voice_websocket_endpoint(
                 if not voice_manager.music_bot_joined(voice_channel_id):
                     continue
 
-                normalized_volume = voice_manager.set_music_bot_volume(
+                normalized_volume = max(0.0, min(5.0, requested_volume))
+                await voice_manager.send_to_user(
                     voice_channel_id,
-                    requested_volume,
-                )
-                await _broadcast_music_bot_volume(
-                    voice_channel_id,
-                    normalized_volume,
+                    user_id,
+                    _music_volume_payload(user_id, normalized_volume),
                 )
 
             elif msg_type == "ping":

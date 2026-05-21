@@ -134,6 +134,7 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _inputTestRawStats = {};
 
   AppState() {
+    unawaited(_applyMusicPlaybackVolume(_defaultMusicBotVolume));
     _musicPlayerCompletionSubscription =
         _musicPlayer.stream.completed.listen((completed) {
       if (completed) {
@@ -300,11 +301,7 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
-  void setVoiceParticipantVolume(
-    int userId,
-    double volume, {
-    bool broadcastMusicVolume = true,
-  }) {
+  void setVoiceParticipantVolume(int userId, double volume) {
     final normalized = volume.clamp(0.0, 5.0).toDouble();
     if (!_storeVoiceParticipantVolume(userId, normalized)) {
       return;
@@ -312,12 +309,6 @@ class AppState extends ChangeNotifier {
 
     if (_isMusicBotParticipantId(userId)) {
       unawaited(_applyMusicPlaybackVolume(normalized));
-      if (broadcastMusicVolume) {
-        _sendVoiceSignal({
-          'type': 'music_volume',
-          'volume': normalized,
-        });
-      }
     } else {
       final renderer = _remoteAudioRenderers[userId];
       if (renderer != null) {
@@ -2092,15 +2083,11 @@ class AppState extends ChangeNotifier {
       return;
     }
     final trackId = _tryParseMusicTrackId(payload['track_id']);
-    final payloadVolume = _tryParseMusicVolume(payload['volume']);
-    if (payloadVolume != null) {
-      _storeVoiceParticipantVolume(_musicBotUserId, payloadVolume);
-    }
-    final playbackVolume =
-        payloadVolume ?? voiceParticipantVolumeFor(_musicBotUserId);
+    final playbackVolume = voiceParticipantVolumeFor(_musicBotUserId);
 
     _suppressMusicCompletionSignals = true;
     try {
+      await _applyMusicPlaybackVolume(playbackVolume);
       await _musicPlayer.stop();
       await _musicPlayer.open(
         media_kit.Media(streamUrl),
@@ -2123,6 +2110,11 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _handleMusicVolumeSignal(Map<String, dynamic> payload) async {
+    final targetUserId = _tryParsePayloadInt(payload['target_user_id']);
+    if (targetUserId == null || targetUserId != currentUser?.id) {
+      return;
+    }
+
     final userId = payload['user_id'];
     final normalizedVolume = _tryParseMusicVolume(payload['volume']);
     if (userId is! int || normalizedVolume == null) {
@@ -2132,16 +2124,22 @@ class AppState extends ChangeNotifier {
     setVoiceParticipantVolume(
       userId,
       normalizedVolume,
-      broadcastMusicVolume: false,
     );
   }
 
   int? _tryParseMusicTrackId(dynamic rawTrackId) {
-    if (rawTrackId is int) {
-      return rawTrackId;
+    return _tryParsePayloadInt(rawTrackId);
+  }
+
+  int? _tryParsePayloadInt(dynamic rawValue) {
+    if (rawValue is int) {
+      return rawValue;
     }
-    if (rawTrackId is String) {
-      return int.tryParse(rawTrackId.trim());
+    if (rawValue is num) {
+      return rawValue.round();
+    }
+    if (rawValue is String) {
+      return int.tryParse(rawValue.trim());
     }
     return null;
   }
