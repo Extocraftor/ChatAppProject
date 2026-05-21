@@ -128,3 +128,14 @@ class ChannelPermissionsSchema(BaseModel):
 
 class ChannelPermissionsUpdate(BaseModel):
     user_permissions: Dict[int, bool] = {}
+
+
+class ChannelNotificationStateSchema(BaseModel):
+    channel_id: int
+    latest_message_id: int
+    latest_message_timestamp: datetime
+    mentioned: bool = False
+
+
+class ChannelReadStateUpdate(BaseModel):
+    message_id: Optional[int] = None

@@ -1482,6 +1482,26 @@ def _can_view_text_channel(db: Session, user: models.User, channel_id: int) -> b
     return not bool(channel.admin_only)
 
 
+def _visible_text_channel_ids_for_user(db: Session, user: models.User) -> List[int]:
+    if _is_admin(user):
+        return [
+            int(row[0])
+            for row in db.query(models.Channel.id).order_by(models.Channel.id.asc()).all()
+        ]
+
+    _ensure_text_channel_permissions_for_user(db, user.id)
+    return [
+        int(row[0])
+        for row in db.query(models.TextChannelPermission.channel_id)
+        .filter(
+            models.TextChannelPermission.user_id == user.id,
+            models.TextChannelPermission.can_view.is_(True),
+        )
+        .order_by(models.TextChannelPermission.channel_id.asc())
+        .all()
+    ]
+
+
 def _can_view_voice_channel(db: Session, user: models.User, channel_id: int) -> bool:
     if _is_admin(user):
         return True
@@ -2445,6 +2465,61 @@ def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
     return db_user
 
 
+@app.get(
+    "/notifications/channel-unread",
+    response_model=List[schemas.ChannelNotificationStateSchema],
+)
+def list_unread_channel_notifications(
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    visible_channel_ids = _visible_text_channel_ids_for_user(db, actor_user)
+    if not visible_channel_ids:
+        return []
+
+    read_states = {
+        int(state.channel_id): int(state.last_read_message_id or 0)
+        for state in db.query(models.TextChannelReadState)
+        .filter(
+            models.TextChannelReadState.user_id == actor_user.id,
+            models.TextChannelReadState.channel_id.in_(visible_channel_ids),
+        )
+        .all()
+    }
+
+    notifications: List[Dict[str, Any]] = []
+    for channel_id in visible_channel_ids:
+        last_read_message_id = read_states.get(channel_id, 0)
+        unread_messages = (
+            db.query(models.Message)
+            .filter(
+                models.Message.channel_id == channel_id,
+                models.Message.user_id != actor_user.id,
+                models.Message.id > last_read_message_id,
+            )
+            .order_by(models.Message.id.asc())
+            .all()
+        )
+        if not unread_messages:
+            continue
+
+        latest_message = unread_messages[-1]
+        notifications.append(
+            {
+                "channel_id": channel_id,
+                "latest_message_id": latest_message.id,
+                "latest_message_timestamp": latest_message.timestamp,
+                "mentioned": any(
+                    actor_user.id in message.mentioned_user_ids
+                    for message in unread_messages
+                ),
+            }
+        )
+
+    return notifications
+
+
 @app.post("/channels/", response_model=schemas.ChannelSchema)
 def create_channel(
     channel: schemas.ChannelCreate,
@@ -2529,6 +2604,9 @@ async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depe
         )
 
     await manager.close_channel(channel_id)
+    db.query(models.TextChannelReadState).filter(
+        models.TextChannelReadState.channel_id == channel_id
+    ).delete(synchronize_session=False)
     db.query(models.TextChannelPermission).filter(
         models.TextChannelPermission.channel_id == channel_id
     ).delete(synchronize_session=False)
@@ -2636,6 +2714,60 @@ def get_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_
         .order_by(models.Message.timestamp.asc())
         .all()
     )
+
+
+@app.post("/channels/{channel_id}/read-state")
+def mark_channel_read(
+    channel_id: int,
+    read_state_update: schemas.ChannelReadStateUpdate,
+    actor_user_id: int,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    _ensure_text_channel_permissions_for_user(db, actor_user.id)
+
+    db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
+    if not db_channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if not _can_view_text_channel(db, actor_user, channel_id):
+        raise HTTPException(status_code=403, detail="You do not have access to this channel")
+
+    latest_query = db.query(models.Message).filter(models.Message.channel_id == channel_id)
+    if read_state_update.message_id is not None:
+        latest_query = latest_query.filter(
+            models.Message.id <= max(0, read_state_update.message_id)
+        )
+    latest_message = latest_query.order_by(models.Message.id.desc()).first()
+    last_read_message_id = int(latest_message.id) if latest_message else 0
+
+    read_state = (
+        db.query(models.TextChannelReadState)
+        .filter(
+            models.TextChannelReadState.user_id == actor_user.id,
+            models.TextChannelReadState.channel_id == channel_id,
+        )
+        .first()
+    )
+    if read_state is None:
+        read_state = models.TextChannelReadState(
+            user_id=actor_user.id,
+            channel_id=channel_id,
+            last_read_message_id=last_read_message_id,
+            updated_at=datetime.utcnow(),
+        )
+        db.add(read_state)
+    else:
+        read_state.last_read_message_id = max(
+            int(read_state.last_read_message_id or 0),
+            last_read_message_id,
+        )
+        read_state.updated_at = datetime.utcnow()
+
+    db.commit()
+    return {
+        "channel_id": channel_id,
+        "last_read_message_id": read_state.last_read_message_id,
+    }
 
 
 @app.get(

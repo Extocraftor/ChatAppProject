@@ -370,6 +370,7 @@ class AppState extends ChangeNotifier {
         }
         await fetchMentionableUsers(notify: false);
         await fetchChannels();
+        await fetchMissedChannelNotifications(notify: false);
         await fetchVoiceChannels();
         await refreshAudioInputDevices(notify: false);
         _connectNotificationSocket();
@@ -1497,9 +1498,85 @@ class AppState extends ChangeNotifier {
     );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
-      messages = data.map((m) => Message.fromJson(m)).toList();
+      final fetchedMessages = data.map((m) => Message.fromJson(m)).toList();
+      messages = fetchedMessages;
+      if (activeChannel?.id == channelId) {
+        _clearChannelNotification(channelId, notify: false);
+        final latestMessageId =
+            fetchedMessages.isNotEmpty ? fetchedMessages.last.id : null;
+        unawaited(
+          markChannelRead(channelId, messageId: latestMessageId),
+        );
+      }
       notifyListeners();
       _scrollToBottom();
+    }
+  }
+
+  Future<void> fetchMissedChannelNotifications({bool notify = true}) async {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    try {
+      final response = await http.get(
+        Uri.parse(
+          "$baseUrl/notifications/channel-unread?actor_user_id=$userId",
+        ),
+      );
+      if (response.statusCode != 200) {
+        return;
+      }
+
+      final List data = jsonDecode(response.body);
+      var changed = false;
+      for (final rawItem in data) {
+        if (rawItem is! Map) {
+          continue;
+        }
+        final item = Map<String, dynamic>.from(rawItem);
+        final channelId = _tryParsePayloadInt(item['channel_id']);
+        if (channelId == null || activeChannel?.id == channelId) {
+          continue;
+        }
+
+        changed = _markChannelNotification(
+              channelId,
+              mentioned: item['mentioned'] == true,
+              notify: false,
+            ) ||
+            changed;
+      }
+
+      if (changed && notify) {
+        notifyListeners();
+      }
+    } catch (_) {
+      // Missed notifications are a catch-up path; live sockets still handle new ones.
+    }
+  }
+
+  Future<void> markChannelRead(int channelId, {int? messageId}) async {
+    final userId = currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    try {
+      final body = <String, dynamic>{};
+      if (messageId != null) {
+        body['message_id'] = messageId;
+      }
+      await http.post(
+        Uri.parse("$baseUrl/channels/$channelId/read-state").replace(
+          queryParameters: {"actor_user_id": "$userId"},
+        ),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode(body),
+      );
+    } catch (_) {
+      // Read-state sync can be retried by the next fetch or socket reconnect.
     }
   }
 
@@ -1654,9 +1731,10 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void _markChannelNotification(
+  bool _markChannelNotification(
     int channelId, {
     required bool mentioned,
+    bool notify = true,
   }) {
     var changed = false;
     if (mentioned) {
@@ -1666,9 +1744,10 @@ class AppState extends ChangeNotifier {
       changed = _channelsWithUnreadMessages.add(channelId) || changed;
     }
 
-    if (changed) {
+    if (changed && notify) {
       notifyListeners();
     }
+    return changed;
   }
 
   void _disconnectNotificationSocket() {
@@ -1709,6 +1788,7 @@ class AppState extends ChangeNotifier {
           return;
         }
         _notificationReconnectAttempt = 0;
+        unawaited(fetchMissedChannelNotifications());
       }).catchError((_) {
         // Stream callbacks handle reconnects.
       }),
@@ -1846,6 +1926,11 @@ class AppState extends ChangeNotifier {
         if (newMessage.isPinned) {
           _applyPinStateFromMessage(newMessage);
         }
+        final channelId = activeChannel?.id;
+        if (channelId != null) {
+          _clearChannelNotification(channelId, notify: false);
+          unawaited(markChannelRead(channelId, messageId: newMessage.id));
+        }
         _scrollToBottom();
         // Multiple delayed scroll attempts to handle different image loading speeds
         if (newMessage.attachmentUrl != null) {
@@ -1944,7 +2029,7 @@ class AppState extends ChangeNotifier {
     clearMessageSearch(notify: false);
 
     _disconnectTextSocket();
-    fetchMessages(channel.id);
+    unawaited(fetchMessages(channel.id));
     unawaited(fetchPinnedMessages());
     _connectTextSocket(channel);
 

@@ -200,3 +200,20 @@ class Message(Base):
             if value not in values:
                 values.append(value)
         return values
+
+
+class TextChannelReadState(Base):
+    __tablename__ = "text_channel_read_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "channel_id",
+            name="uq_text_channel_read_states_user_channel",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    channel_id = Column(Integer, ForeignKey("channels.id"), nullable=False, index=True)
+    last_read_message_id = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
