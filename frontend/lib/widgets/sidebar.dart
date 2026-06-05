@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 
-import '../models/chat_models.dart';
+import '../screens/settings_screen.dart';
 import '../providers/app_state.dart';
 import '../screens/admin_permissions_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
@@ -142,7 +142,14 @@ class Sidebar extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const Icon(Icons.settings, color: Colors.grey),
+                IconButton(
+                  icon: const Icon(Icons.settings, color: Colors.grey),
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                    );
+                  },
+                ),
               ],
             ),
           ),
@@ -453,26 +460,31 @@ class _VoiceChannelTile extends StatelessWidget {
     final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
     final isConnecting = context.select<AppState, bool>((s) => s.isVoiceConnecting);
 
-    List<VoiceParticipant> participants = [];
+    List<VoiceParticipant> participants = channel.participants;
     if (isActive) {
+      // Use live participants if active
       participants = context.select<AppState, List<VoiceParticipant>>(
           (s) => s.voiceParticipants.values.toList());
-      final currentUserId =
-          context.select<AppState, int?>((s) => s.currentUser?.id);
-      participants.sort((a, b) {
-        final aIsCurrent = a.userId == currentUserId;
-        final bIsCurrent = b.userId == currentUserId;
-        if (aIsCurrent != bIsCurrent) {
-          return aIsCurrent ? -1 : 1;
-        }
-        if (a.isBot != b.isBot) {
-          return a.isBot ? 1 : -1;
-        }
-        return a.username.toLowerCase().compareTo(
-              b.username.toLowerCase(),
-            );
-      });
     }
+
+    final currentUserId =
+        context.select<AppState, int?>((s) => s.currentUser?.id);
+    
+    // Create a copy to sort
+    final sortedParticipants = List<VoiceParticipant>.from(participants);
+    sortedParticipants.sort((a, b) {
+      final aIsCurrent = a.userId == currentUserId;
+      final bIsCurrent = b.userId == currentUserId;
+      if (aIsCurrent != bIsCurrent) {
+        return aIsCurrent ? -1 : 1;
+      }
+      if (a.isBot != b.isBot) {
+        return a.isBot ? 1 : -1;
+      }
+      return a.username.toLowerCase().compareTo(
+            b.username.toLowerCase(),
+          );
+    });
 
     Widget? trailing;
     if (isActive) {
@@ -591,8 +603,8 @@ class _VoiceChannelTile extends StatelessWidget {
               style: TextStyle(
                   color: isActive ? Colors.white : Colors.grey),
             ),
-            subtitle: isActive
-                ? Text("${participants.length} connected")
+            subtitle: sortedParticipants.isNotEmpty
+                ? Text("${sortedParticipants.length} connected")
                 : null,
             trailing: trailing,
             selected: isActive,
@@ -600,8 +612,8 @@ class _VoiceChannelTile extends StatelessWidget {
             onTap: isConnecting ? null : () => _handleVoiceChannelTap(context, channel, isActive),
           ),
         ),
-        if (isActive && participants.isNotEmpty)
-          ...participants.map((participant) => _VoiceParticipantTile(participant: participant)),
+        if (sortedParticipants.isNotEmpty)
+          ...sortedParticipants.map((participant) => _VoiceParticipantTile(participant: participant)),
       ],
     );
   }
@@ -722,6 +734,22 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
               padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
               child: Row(
                 children: [
+                  if (!isMusicBot)
+                    Container(
+                      width: 20,
+                      height: 20,
+                      margin: const EdgeInsets.only(right: 6),
+                      child: CircleAvatar(
+                        radius: 10,
+                        backgroundColor: const Color(0xFF5865F2),
+                        backgroundImage: widget.participant.profilePictureUrl != null
+                            ? NetworkImage(state.resolveMediaUrl(widget.participant.profilePictureUrl!))
+                            : null,
+                        child: widget.participant.profilePictureUrl == null
+                            ? const Icon(Icons.person, size: 12, color: Colors.white)
+                            : null,
+                      ),
+                    ),
                   Icon(
                     isMusicBot
                         ? Icons.music_note

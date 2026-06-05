@@ -148,6 +148,10 @@ def _ensure_schema_columns() -> None:
             conn.execute(
                 text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'member'")
             )
+        if "profile_picture_url" not in user_columns:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN profile_picture_url VARCHAR")
+            )
 
         channel_columns = {
             column["name"] for column in inspector.get_columns("channels")
@@ -388,6 +392,8 @@ class VoiceConnectionManager:
         self.active_connections: Dict[int, Dict[int, WebSocket]] = {}
         # channel_id -> user_id -> username
         self.usernames: Dict[int, Dict[int, str]] = {}
+        # channel_id -> user_id -> profile_picture_url
+        self.profile_picture_urls: Dict[int, Dict[int, str | None]] = {}
         # channel_id -> user_id -> muted state
         self.mute_states: Dict[int, Dict[int, bool]] = {}
         # channel_id -> user_id -> screen share state
@@ -395,12 +401,14 @@ class VoiceConnectionManager:
         # channel_id -> whether the synthetic music bot participant is present
         self.music_bot_presence: Dict[int, bool] = {}
 
-    async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str):
+    async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, username: str, profile_picture_url: str | None = None):
         await websocket.accept()
         if channel_id not in self.active_connections:
             self.active_connections[channel_id] = {}
         if channel_id not in self.usernames:
             self.usernames[channel_id] = {}
+        if channel_id not in self.profile_picture_urls:
+            self.profile_picture_urls[channel_id] = {}
         if channel_id not in self.mute_states:
             self.mute_states[channel_id] = {}
         if channel_id not in self.screen_share_states:
@@ -416,6 +424,7 @@ class VoiceConnectionManager:
 
         self.active_connections[channel_id][user_id] = websocket
         self.usernames[channel_id][user_id] = username
+        self.profile_picture_urls[channel_id][user_id] = profile_picture_url
         self.mute_states[channel_id].setdefault(user_id, False)
         self.screen_share_states[channel_id].setdefault(user_id, False)
 
@@ -439,6 +448,11 @@ class VoiceConnectionManager:
             if not self.usernames[channel_id]:
                 self.usernames.pop(channel_id, None)
 
+        if channel_id in self.profile_picture_urls:
+            self.profile_picture_urls[channel_id].pop(user_id, None)
+            if not self.profile_picture_urls[channel_id]:
+                self.profile_picture_urls.pop(channel_id, None)
+
         if channel_id in self.mute_states:
             self.mute_states[channel_id].pop(user_id, None)
             if not self.mute_states[channel_id]:
@@ -452,12 +466,14 @@ class VoiceConnectionManager:
 
     def participants(self, channel_id: int) -> List[Dict[str, Any]]:
         usernames = self.usernames.get(channel_id, {})
+        profile_picture_urls = self.profile_picture_urls.get(channel_id, {})
         mute_states = self.mute_states.get(channel_id, {})
         screen_share_states = self.screen_share_states.get(channel_id, {})
         participants = [
             {
                 "user_id": user_id,
                 "username": usernames.get(user_id, f"User #{user_id}"),
+                "profile_picture_url": profile_picture_urls.get(user_id),
                 "is_muted": mute_states.get(user_id, False),
                 "is_screen_sharing": screen_share_states.get(user_id, False),
                 "is_bot": False,
@@ -469,6 +485,7 @@ class VoiceConnectionManager:
                 {
                     "user_id": MUSIC_BOT_USER_ID,
                     "username": MUSIC_BOT_USERNAME,
+                    "profile_picture_url": None,
                     "is_muted": False,
                     "is_screen_sharing": False,
                     "is_bot": True,
@@ -1591,6 +1608,7 @@ def _serialize_message_payload(message: models.Message, payload_type: str) -> Di
         "attachment_size": message.attachment_size,
         "mentioned_user_ids": message.mentioned_user_ids,
         "mentioned_usernames": message.mentioned_usernames,
+        "author_profile_picture_url": message.author_profile_picture_url,
     }
 
 
@@ -2171,6 +2189,58 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     _ensure_permissions_for_new_user(db, db_user.id)
     db.refresh(db_user)
     return db_user
+
+
+@app.get("/users/me", response_model=schemas.UserSchema)
+def get_me(actor_user_id: int, db: Session = Depends(get_db)):
+    return _ensure_actor_user(db, actor_user_id)
+
+
+@app.patch("/users/me", response_model=schemas.UserSchema)
+def update_me(
+    actor_user_id: int,
+    user_update: schemas.UserUpdate,
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    if user_update.username is not None:
+        existing = db.query(models.User).filter(models.User.username == user_update.username).first()
+        if existing and existing.id != actor_user.id:
+            raise HTTPException(status_code=400, detail="Username already taken")
+        actor_user.username = user_update.username
+    if user_update.profile_picture_url is not None:
+        actor_user.profile_picture_url = user_update.profile_picture_url
+
+    db.commit()
+    db.refresh(actor_user)
+    return actor_user
+
+
+@app.post("/users/me/profile-picture", response_model=schemas.UserSchema)
+async def upload_profile_picture(
+    actor_user_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    actor_user = _ensure_actor_user(db, actor_user_id)
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="File is empty")
+    if len(payload) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    original_name = file.filename or "pfp.png"
+    _, extension = os.path.splitext(original_name)
+    stored_name = f"pfp_{actor_user.id}_{uuid4().hex[:8]}{extension}"
+    storage_path = os.path.join(ATTACHMENT_UPLOAD_DIR, stored_name)
+
+    with open(storage_path, "wb") as f:
+        f.write(payload)
+
+    actor_user.profile_picture_url = f"/uploads/{stored_name}"
+    db.commit()
+    db.refresh(actor_user)
+    return actor_user
 
 
 @app.get("/users/", response_model=List[schemas.UserSchema])
@@ -3001,12 +3071,16 @@ def list_voice_channels(actor_user_id: int, db: Session = Depends(get_db)):
     ]
     if not allowed_channel_ids:
         return []
-    return (
+    channels = (
         db.query(models.VoiceChannel)
         .filter(models.VoiceChannel.id.in_(allowed_channel_ids))
         .order_by(models.VoiceChannel.name.asc())
         .all()
     )
+    # Populate participants for each channel
+    for channel in channels:
+        channel.participants = voice_manager.participants(channel.id)
+    return channels
 
 
 @app.delete("/voice-channels/{voice_channel_id}")
@@ -3429,7 +3503,8 @@ async def voice_websocket_endpoint(
         return
 
     username = db_user.username
-    await voice_manager.connect(websocket, voice_channel_id, user_id, username)
+    profile_picture_url = db_user.profile_picture_url
+    await voice_manager.connect(websocket, voice_channel_id, user_id, username, profile_picture_url=profile_picture_url)
     logger.info("voice connect channel=%s user=%s", voice_channel_id, user_id)
 
     await voice_manager.send_to_user(

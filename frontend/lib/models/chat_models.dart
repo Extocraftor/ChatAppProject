@@ -2,14 +2,21 @@ class User {
   final int id;
   final String username;
   final String role;
+  final String? profilePictureUrl;
 
-  User({required this.id, required this.username, required this.role});
+  User({
+    required this.id,
+    required this.username,
+    required this.role,
+    this.profilePictureUrl,
+  });
 
   factory User.fromJson(Map<String, dynamic> json) {
     return User(
       id: json['id'],
       username: json['username'],
       role: json['role'] ?? "member",
+      profilePictureUrl: json['profile_picture_url'],
     );
   }
 }
@@ -42,20 +49,28 @@ class VoiceChannel {
   final String name;
   final String? description;
   final int? creatorUserId;
+  final List<VoiceParticipant> participants;
 
   VoiceChannel({
     required this.id,
     required this.name,
     this.description,
     this.creatorUserId,
+    this.participants = const [],
   });
 
   factory VoiceChannel.fromJson(Map<String, dynamic> json) {
+    var participantsJson = json['participants'] as List? ?? [];
+    List<VoiceParticipant> participants = participantsJson
+        .map((p) => VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
+        .toList();
+
     return VoiceChannel(
       id: json['id'],
       name: json['name'],
       description: json['description'],
       creatorUserId: json['creator_user_id'],
+      participants: participants,
     );
   }
 }
@@ -63,6 +78,7 @@ class VoiceChannel {
 class VoiceParticipant {
   final int userId;
   final String username;
+  final String? profilePictureUrl;
   final bool isMuted;
   final bool isScreenSharing;
   final bool isBot;
@@ -71,12 +87,14 @@ class VoiceParticipant {
     required this.userId,
     required this.username,
     required this.isMuted,
+    this.profilePictureUrl,
     this.isScreenSharing = false,
     this.isBot = false,
   });
 
   VoiceParticipant copyWith({
     String? username,
+    String? profilePictureUrl,
     bool? isMuted,
     bool? isScreenSharing,
     bool? isBot,
@@ -84,6 +102,7 @@ class VoiceParticipant {
     return VoiceParticipant(
       userId: userId,
       username: username ?? this.username,
+      profilePictureUrl: profilePictureUrl ?? this.profilePictureUrl,
       isMuted: isMuted ?? this.isMuted,
       isScreenSharing: isScreenSharing ?? this.isScreenSharing,
       isBot: isBot ?? this.isBot,
@@ -94,6 +113,7 @@ class VoiceParticipant {
     return VoiceParticipant(
       userId: json['user_id'],
       username: json['username'] ?? "User #${json['user_id']}",
+      profilePictureUrl: json['profile_picture_url'],
       isMuted: json['is_muted'] ?? false,
       isScreenSharing: json['is_screen_sharing'] == true,
       isBot: json['is_bot'] == true,
@@ -122,6 +142,7 @@ class Message {
   final int? attachmentSize;
   final List<int> mentionedUserIds;
   final List<String> mentionedUsernames;
+  final String? authorProfilePictureUrl;
 
   Message({
     required this.id,
@@ -142,6 +163,7 @@ class Message {
     this.attachmentSize,
     List<int>? mentionedUserIds,
     List<String>? mentionedUsernames,
+    this.authorProfilePictureUrl,
   })  : mentionedUserIds =
             List<int>.unmodifiable(mentionedUserIds ?? const <int>[]),
         mentionedUsernames =
@@ -234,6 +256,7 @@ class Message {
           : int.tryParse("${json['attachment_size'] ?? ''}"),
       mentionedUserIds: mentionedUserIds,
       mentionedUsernames: mentionedUsernames,
+      authorProfilePictureUrl: json['author_profile_picture_url'],
     );
   }
 }

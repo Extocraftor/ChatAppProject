@@ -19,6 +19,7 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     role = Column(String, default="member", nullable=False)
+    profile_picture_url = Column(String, nullable=True)
     messages = relationship(
         "Message",
         back_populates="user",
@@ -145,6 +146,10 @@ class Message(Base):
     @property
     def username(self):
         return self.user.username if self.user else "Unknown"
+
+    @property
+    def author_profile_picture_url(self):
+        return self.user.profile_picture_url if self.user else None
 
     @property
     def parent_username(self):

@@ -77,6 +77,7 @@ class AppState extends ChangeNotifier {
   final Set<int> _screenSharingUserIds = <int>{};
   final Map<int, double> _voiceParticipantVolumes = {};
   final media_kit.Player _musicPlayer = media_kit.Player();
+  final media_kit.Player _notificationPlayer = media_kit.Player();
   StreamSubscription<bool>? _musicPlayerCompletionSubscription;
   int? _activeMusicTrackId;
   bool _suppressMusicCompletionSignals = false;
@@ -147,6 +148,73 @@ class AppState extends ChangeNotifier {
         _handleMusicTrackCompleted();
       }
     });
+  }
+
+  void _playNotificationSound() {
+    try {
+      // Use a free notification sound URL
+      _notificationPlayer.open(
+        media_kit.Media('https://www.myinstants.com/media/sounds/discord-notification.mp3'),
+      );
+    } catch (e) {
+      debugPrint("Error playing notification sound: $e");
+    }
+  }
+
+  Future<void> fetchCurrentUser() async {
+    final userId = currentUser?.id;
+    if (userId == null) return;
+    try {
+      final response = await http.get(Uri.parse("$baseUrl/users/me?actor_user_id=$userId"));
+      if (response.statusCode == 200) {
+        currentUser = User.fromJson(jsonDecode(response.body));
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint("Error fetching current user: $e");
+    }
+  }
+
+  Future<String?> updateProfile({String? username}) async {
+    final userId = currentUser?.id;
+    if (userId == null) return "Not logged in";
+    try {
+      final response = await http.patch(
+        Uri.parse("$baseUrl/users/me?actor_user_id=$userId"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"username": username}),
+      );
+      if (response.statusCode == 200) {
+        currentUser = User.fromJson(jsonDecode(response.body));
+        notifyListeners();
+        return null;
+      }
+      final data = jsonDecode(response.body);
+      return data['detail'] ?? "Update failed";
+    } catch (e) {
+      return "Connection error: $e";
+    }
+  }
+
+  Future<String?> uploadProfilePicture(Uint8List bytes, String filename) async {
+    final userId = currentUser?.id;
+    if (userId == null) return "Not logged in";
+    try {
+      final uri = Uri.parse("$baseUrl/users/me/profile-picture?actor_user_id=$userId");
+      final request = http.MultipartRequest("POST", uri);
+      request.files.add(http.MultipartFile.fromBytes("file", bytes, filename: filename));
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      if (response.statusCode == 200) {
+        currentUser = User.fromJson(jsonDecode(response.body));
+        notifyListeners();
+        return null;
+      }
+      final data = jsonDecode(response.body);
+      return data['detail'] ?? "Upload failed";
+    } catch (e) {
+      return "Connection error: $e";
+    }
   }
 
   bool get _isWindowsDesktop =>
@@ -1889,6 +1957,8 @@ class AppState extends ChangeNotifier {
       if (authorUserId == userId) {
         return;
       }
+
+      _playNotificationSound();
 
       if (activeChannel?.id == channelId) {
         _clearChannelNotification(channelId);

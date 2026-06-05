@@ -63,6 +63,7 @@ class VoiceChannelSchema(VoiceChannelBase):
     id: int
     admin_only: bool = False
     creator_user_id: Optional[int] = None
+    participants: List["VoiceParticipantSchema"] = []
 
     class Config:
         from_attributes = True
@@ -71,6 +72,7 @@ class VoiceChannelSchema(VoiceChannelBase):
 class VoiceParticipantSchema(BaseModel):
     user_id: int
     username: str
+    profile_picture_url: Optional[str] = None
     is_muted: bool = False
     is_bot: bool = False
 
@@ -84,9 +86,15 @@ class UserCreate(UserBase):
 class UserSchema(UserBase):
     id: int
     role: str
+    profile_picture_url: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    profile_picture_url: Optional[str] = None
 
 
 class UserRoleUpdate(BaseModel):

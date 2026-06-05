@@ -447,10 +447,15 @@ class _MessageItemState extends State<MessageItem> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const CircleAvatar(
+                    CircleAvatar(
                       radius: 18,
-                      backgroundColor: Color(0xFF4F545C),
-                      child: Icon(Icons.person, size: 20),
+                      backgroundColor: const Color(0xFF4F545C),
+                      backgroundImage: widget.message.authorProfilePictureUrl != null
+                          ? NetworkImage(context.read<AppState>().resolveMediaUrl(widget.message.authorProfilePictureUrl!))
+                          : null,
+                      child: widget.message.authorProfilePictureUrl == null
+                          ? const Icon(Icons.person, size: 20, color: Colors.white)
+                          : null,
                     ),
                     const SizedBox(width: 12),
                     Expanded(
