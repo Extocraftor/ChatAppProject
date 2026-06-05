@@ -1987,13 +1987,16 @@ class AppState extends ChangeNotifier {
           final participants = participantsJson
               .map((p) => VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
               .toList();
-          voiceChannels[index] = VoiceChannel(
-            id: voiceChannels[index].id,
-            name: voiceChannels[index].name,
-            description: voiceChannels[index].description,
-            creatorUserId: voiceChannels[index].creatorUserId,
+          
+          final newList = List<VoiceChannel>.from(voiceChannels);
+          newList[index] = VoiceChannel(
+            id: newList[index].id,
+            name: newList[index].name,
+            description: newList[index].description,
+            creatorUserId: newList[index].creatorUserId,
             participants: participants,
           );
+          voiceChannels = newList;
           notifyListeners();
         }
         return;

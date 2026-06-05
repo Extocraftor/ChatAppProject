@@ -496,6 +496,13 @@ class _VoiceChannelTile extends StatelessWidget {
     
     // Create a copy to sort
     final sortedParticipants = List<VoiceParticipant>.from(participants);
+    
+    // If we are not active in this channel, we shouldn't be in the list
+    // (handles stale server state or broadcast delays)
+    if (!isActive && currentUserId != null) {
+      sortedParticipants.removeWhere((p) => p.userId == currentUserId);
+    }
+
     sortedParticipants.sort((a, b) {
       final aIsCurrent = a.userId == currentUserId;
       final bIsCurrent = b.userId == currentUserId;
