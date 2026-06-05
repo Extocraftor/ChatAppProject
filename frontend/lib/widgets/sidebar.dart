@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 
 import '../screens/settings_screen.dart';
+import '../models/chat_models.dart';
 import '../providers/app_state.dart';
 import '../screens/admin_permissions_screen.dart';
 import '../screens/voice_diagnostics_screen.dart';
@@ -130,9 +131,19 @@ class Sidebar extends StatelessWidget {
             color: const Color(0xFF292B2F),
             child: Row(
               children: [
-                const CircleAvatar(
-                  backgroundColor: Color(0xFF5865F2),
-                  child: Icon(Icons.person, color: Colors.white),
+                CircleAvatar(
+                  backgroundColor: const Color(0xFF5865F2),
+                  backgroundImage: context.select<AppState, String?>(
+                              (s) => s.currentUser?.profilePictureUrl) !=
+                          null
+                      ? NetworkImage(context.read<AppState>().resolveMediaUrl(
+                          context.read<AppState>().currentUser!.profilePictureUrl!))
+                      : null,
+                  child: context.select<AppState, String?>(
+                              (s) => s.currentUser?.profilePictureUrl) ==
+                          null
+                      ? const Icon(Icons.person, color: Colors.white)
+                      : null,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -299,6 +310,7 @@ class _TextChannelTile extends StatelessWidget {
     final canDeleteChannel = context.select<AppState, bool>(
         (s) => s.canDeleteTextChannel(channel));
     final isAdmin = context.select<AppState, bool>((s) => s.isAdmin);
+    final isMuted = context.select<AppState, bool>((s) => s.isChannelMuted(channel.id));
     final channelColor =
         isActive || hasMention || hasActivity ? Colors.white : Colors.grey;
     final symbolColor = isActive
@@ -337,6 +349,18 @@ class _TextChannelTile extends StatelessWidget {
             : null;
 
     final trailingActions = <Widget>[
+      IconButton(
+        icon: Icon(
+          isMuted ? Icons.notifications_off : Icons.notifications,
+          size: 18,
+          color: isMuted ? Colors.redAccent : Colors.grey,
+        ),
+        tooltip: isMuted ? "Unmute notifications" : "Mute notifications",
+        onPressed: () =>
+            context.read<AppState>().toggleChannelNotifications(channel.id),
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
+      ),
       if (notificationBadge != null) notificationBadge,
       if (isAdmin)
         IconButton(

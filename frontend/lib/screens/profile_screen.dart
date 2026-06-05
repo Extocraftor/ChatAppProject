@@ -4,6 +4,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_state.dart';
 
+import 'crop_avatar_screen.dart';
+
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
 
@@ -31,18 +33,31 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
 
     if (result != null && result.files.single.bytes != null) {
-      final bytes = result.files.single.bytes!;
+      final initialBytes = result.files.single.bytes!;
       final filename = result.files.single.name;
-      
-      setState(() => _isSaving = true);
-      final error = await context.read<AppState>().uploadProfilePicture(bytes, filename);
-      setState(() => _isSaving = false);
 
-      if (error != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(error), backgroundColor: Colors.redAccent),
-          );
+      if (!mounted) return;
+
+      final croppedBytes = await Navigator.of(context).push<Uint8List>(
+        MaterialPageRoute(
+          builder: (_) => CropAvatarScreen(
+            imageBytes: initialBytes,
+            filename: filename,
+          ),
+        ),
+      );
+
+      if (croppedBytes != null) {
+        setState(() => _isSaving = true);
+        final error = await context.read<AppState>().uploadProfilePicture(croppedBytes, filename);
+        setState(() => _isSaving = false);
+
+        if (error != null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(error), backgroundColor: Colors.redAccent),
+            );
+          }
         }
       }
     }

@@ -140,6 +140,8 @@ class AppState extends ChangeNotifier {
   DateTime? _inputTestLastSampleAt;
   final Map<String, String> _inputTestRawStats = {};
 
+  final Set<int> _mutedChannelIds = <int>{};
+
   AppState() {
     unawaited(_applyMusicPlaybackVolume(_defaultMusicBotVolume));
     _musicPlayerCompletionSubscription =
@@ -150,7 +152,10 @@ class AppState extends ChangeNotifier {
     });
   }
 
-  void _playNotificationSound() {
+  void _playNotificationSound(int channelId) {
+    if (_mutedChannelIds.contains(channelId)) {
+      return;
+    }
     try {
       // Use a free notification sound URL
       _notificationPlayer.open(
@@ -159,6 +164,17 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       debugPrint("Error playing notification sound: $e");
     }
+  }
+
+  bool isChannelMuted(int channelId) => _mutedChannelIds.contains(channelId);
+
+  void toggleChannelNotifications(int channelId) {
+    if (_mutedChannelIds.contains(channelId)) {
+      _mutedChannelIds.remove(channelId);
+    } else {
+      _mutedChannelIds.add(channelId);
+    }
+    notifyListeners();
   }
 
   Future<void> fetchCurrentUser() async {
@@ -173,6 +189,23 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       debugPrint("Error fetching current user: $e");
     }
+  }
+
+  void logout() {
+    _disconnectTextSocket();
+    _disconnectNotificationSocket();
+    unawaited(leaveVoiceChannel());
+    currentUser = null;
+    channels = [];
+    activeChannel = null;
+    messages = [];
+    pinnedMessages = [];
+    voiceChannels = [];
+    activeVoiceChannel = null;
+    voiceParticipants.clear();
+    _channelsWithUnreadMessages.clear();
+    _channelsWithMentions.clear();
+    notifyListeners();
   }
 
   Future<String?> updateProfile({String? username}) async {
@@ -1943,6 +1976,29 @@ class AppState extends ChangeNotifier {
       if (type == 'pong') {
         return;
       }
+
+      if (type == 'voice_channel_update') {
+        final voiceChannelId = _tryParsePayloadInt(payload['voice_channel_id']);
+        final participantsJson = payload['participants'] as List? ?? [];
+        if (voiceChannelId == null) return;
+
+        final index = voiceChannels.indexWhere((c) => c.id == voiceChannelId);
+        if (index != -1) {
+          final participants = participantsJson
+              .map((p) => VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
+              .toList();
+          voiceChannels[index] = VoiceChannel(
+            id: voiceChannels[index].id,
+            name: voiceChannels[index].name,
+            description: voiceChannels[index].description,
+            creatorUserId: voiceChannels[index].creatorUserId,
+            participants: participants,
+          );
+          notifyListeners();
+        }
+        return;
+      }
+
       if (type != 'channel_message') {
         return;
       }
@@ -1958,7 +2014,7 @@ class AppState extends ChangeNotifier {
         return;
       }
 
-      _playNotificationSound();
+      _playNotificationSound(channelId);
 
       if (activeChannel?.id == channelId) {
         _clearChannelNotification(channelId);

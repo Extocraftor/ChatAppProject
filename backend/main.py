@@ -343,6 +343,33 @@ class NotificationConnectionManager:
             except Exception:
                 self.disconnect(connection, user_id)
 
+    async def broadcast_voice_state(self, db: Session, voice_channel_id: int):
+        """Broadcasts the current participant list of a voice channel to all connected notification users who can see it."""
+        participants = voice_manager.participants(voice_channel_id)
+        connected_user_ids = list(self.active_connections.keys())
+        if not connected_user_ids:
+            return
+
+        recipients = (
+            db.query(models.User)
+            .filter(models.User.id.in_(connected_user_ids))
+            .all()
+        )
+        for recipient in recipients:
+            recipient_user_id = int(recipient.id)
+            _ensure_voice_channel_permissions_for_user(db, recipient_user_id)
+            if not _can_view_voice_channel(db, recipient, voice_channel_id):
+                continue
+
+            await self.send_to_user(
+                recipient_user_id,
+                {
+                    "type": "voice_channel_update",
+                    "voice_channel_id": voice_channel_id,
+                    "participants": participants,
+                },
+            )
+
     async def notify_channel_message(self, db: Session, message: models.Message):
         connected_user_ids = list(self.active_connections.keys())
         if not connected_user_ids:
@@ -3506,6 +3533,7 @@ async def voice_websocket_endpoint(
     profile_picture_url = db_user.profile_picture_url
     await voice_manager.connect(websocket, voice_channel_id, user_id, username, profile_picture_url=profile_picture_url)
     logger.info("voice connect channel=%s user=%s", voice_channel_id, user_id)
+    await notification_manager.broadcast_voice_state(db, voice_channel_id)
 
     await voice_manager.send_to_user(
         voice_channel_id,
@@ -3641,6 +3669,7 @@ async def voice_websocket_endpoint(
             websocket=websocket,
         )
         if removed:
+            await notification_manager.broadcast_voice_state(db, voice_channel_id)
             await voice_manager.broadcast(
                 voice_channel_id,
                 {
