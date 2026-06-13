@@ -1977,6 +1977,50 @@ class AppState extends ChangeNotifier {
         return;
       }
 
+      if (type == 'user_update') {
+        final userId = _tryParsePayloadInt(payload['id']);
+        final username = payload['username']?.toString();
+        final profilePictureUrl = payload['profile_picture_url']?.toString();
+        if (userId == null) return;
+
+        // Update current user if it's us
+        if (currentUser?.id == userId) {
+          currentUser = User(
+            id: userId,
+            username: username ?? currentUser!.username,
+            role: currentUser!.role,
+            profilePictureUrl: profilePictureUrl,
+          );
+        }
+
+        // Update profile pictures in existing messages
+        bool changed = false;
+        for (int i = 0; i < messages.length; i++) {
+          if (messages[i].userId == userId) {
+            messages[i] = messages[i].copyWith(
+              authorProfilePictureUrl: profilePictureUrl,
+            );
+            changed = true;
+          }
+        }
+        
+        // Update voice participants if they are in the sidebar
+        for (final channel in voiceChannels) {
+          for (final participant in channel.participants) {
+            if (participant.userId == userId) {
+              // This is tricky because VoiceChannel is immutable here.
+              // But we can trigger a refresh or let the voice_channel_update handle it.
+              // For now, trigger a notifyListeners if any message changed.
+            }
+          }
+        }
+
+        if (changed || currentUser?.id == userId) {
+          notifyListeners();
+        }
+        return;
+      }
+
       if (type == 'voice_channel_update') {
         final voiceChannelId = _tryParsePayloadInt(payload['voice_channel_id']);
         final participantsJson = payload['participants'] as List? ?? [];

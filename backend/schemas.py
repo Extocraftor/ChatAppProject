@@ -29,6 +29,7 @@ class MessageSchema(MessageBase):
     attachment_size: Optional[int] = None
     mentioned_user_ids: List[int] = Field(default_factory=list)
     mentioned_usernames: List[str] = Field(default_factory=list)
+    author_profile_picture_url: Optional[str] = None
 
     class Config:
         from_attributes = True

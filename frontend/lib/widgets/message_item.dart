@@ -447,15 +447,37 @@ class _MessageItemState extends State<MessageItem> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    CircleAvatar(
-                      radius: 18,
-                      backgroundColor: const Color(0xFF4F545C),
-                      backgroundImage: widget.message.authorProfilePictureUrl != null
-                          ? NetworkImage(context.read<AppState>().resolveMediaUrl(widget.message.authorProfilePictureUrl!))
-                          : null,
-                      child: widget.message.authorProfilePictureUrl == null
-                          ? const Icon(Icons.person, size: 20, color: Colors.white)
-                          : null,
+                    ClipOval(
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        color: const Color(0xFF4F545C),
+                        child: widget.message.authorProfilePictureUrl != null
+                            ? Image.network(
+                                context.read<AppState>().resolveMediaUrl(
+                                    widget.message.authorProfilePictureUrl!),
+                                fit: BoxFit.cover,
+                                loadingBuilder: (context, child, loadingProgress) {
+                                  if (loadingProgress == null) return child;
+                                  return const Center(
+                                    child: SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white24,
+                                      ),
+                                    ),
+                                  );
+                                },
+                                errorBuilder: (context, error, stackTrace) {
+                                  return const Icon(Icons.person,
+                                      size: 20, color: Colors.white);
+                                },
+                              )
+                            : const Icon(Icons.person,
+                                size: 20, color: Colors.white),
+                      ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(

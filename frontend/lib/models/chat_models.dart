@@ -181,6 +181,7 @@ class Message {
     Object? attachmentSize = _unset,
     List<int>? mentionedUserIds,
     List<String>? mentionedUsernames,
+    Object? authorProfilePictureUrl = _unset,
   }) {
     return Message(
       id: id,
@@ -213,6 +214,9 @@ class Message {
           : attachmentSize as int?,
       mentionedUserIds: mentionedUserIds ?? this.mentionedUserIds,
       mentionedUsernames: mentionedUsernames ?? this.mentionedUsernames,
+      authorProfilePictureUrl: identical(authorProfilePictureUrl, _unset)
+          ? this.authorProfilePictureUrl
+          : authorProfilePictureUrl as String?,
     );
   }
 

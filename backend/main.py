@@ -343,6 +343,18 @@ class NotificationConnectionManager:
             except Exception:
                 self.disconnect(connection, user_id)
 
+    async def broadcast_user_update(self, user: models.User):
+        """Broadcasts a user's updated profile (username, PFP) to all connected users."""
+        payload = {
+            "type": "user_update",
+            "id": user.id,
+            "username": user.username,
+            "profile_picture_url": user.profile_picture_url,
+        }
+        connected_user_ids = list(self.active_connections.keys())
+        for recipient_id in connected_user_ids:
+            await self.send_to_user(recipient_id, payload)
+
     async def broadcast_voice_state(self, db: Session, voice_channel_id: int):
         """Broadcasts the current participant list of a voice channel to all connected notification users who can see it."""
         participants = voice_manager.participants(voice_channel_id)
@@ -2240,6 +2252,7 @@ def update_me(
 
     db.commit()
     db.refresh(actor_user)
+    await notification_manager.broadcast_user_update(actor_user)
     return actor_user
 
 
@@ -2267,6 +2280,7 @@ async def upload_profile_picture(
     actor_user.profile_picture_url = f"/uploads/{stored_name}"
     db.commit()
     db.refresh(actor_user)
+    await notification_manager.broadcast_user_update(actor_user)
     return actor_user
 
 
@@ -2946,6 +2960,11 @@ async def pin_message(
 
     target_message = (
         db.query(models.Message)
+        .options(
+            joinedload(models.Message.user),
+            joinedload(models.Message.parent).joinedload(models.Message.user),
+            joinedload(models.Message.pinned_by),
+        )
         .filter(
             models.Message.id == message_id,
             models.Message.channel_id == channel_id,
@@ -2995,6 +3014,11 @@ async def unpin_message(
 
     target_message = (
         db.query(models.Message)
+        .options(
+            joinedload(models.Message.user),
+            joinedload(models.Message.parent).joinedload(models.Message.user),
+            joinedload(models.Message.pinned_by),
+        )
         .filter(
             models.Message.id == message_id,
             models.Message.channel_id == channel_id,
@@ -3412,9 +3436,9 @@ async def websocket_endpoint(
                             "content": normalized_content,
                             "mentioned_user_ids": db_message.mentioned_user_ids,
                             "mentioned_usernames": db_message.mentioned_usernames,
+                            "author_profile_picture_url": db_message.author_profile_picture_url,
                         }
                     )
-
                 elif msg_type == "delete_message":
                     msg_id = data_json.get("id")
                     db_message = (
