@@ -82,6 +82,7 @@ class VoiceParticipant {
   final bool isMuted;
   final bool isScreenSharing;
   final bool isBot;
+  final bool isSpeaking;
 
   VoiceParticipant({
     required this.userId,
@@ -90,6 +91,7 @@ class VoiceParticipant {
     this.profilePictureUrl,
     this.isScreenSharing = false,
     this.isBot = false,
+    this.isSpeaking = false,
   });
 
   VoiceParticipant copyWith({
@@ -98,6 +100,7 @@ class VoiceParticipant {
     bool? isMuted,
     bool? isScreenSharing,
     bool? isBot,
+    bool? isSpeaking,
   }) {
     return VoiceParticipant(
       userId: userId,
@@ -106,6 +109,7 @@ class VoiceParticipant {
       isMuted: isMuted ?? this.isMuted,
       isScreenSharing: isScreenSharing ?? this.isScreenSharing,
       isBot: isBot ?? this.isBot,
+      isSpeaking: isSpeaking ?? this.isSpeaking,
     );
   }
 

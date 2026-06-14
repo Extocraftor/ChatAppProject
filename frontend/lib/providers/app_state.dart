@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,19 +17,70 @@ import '../models/chat_models.dart';
 import '../utils/ws_channel_factory.dart';
 
 class AppState extends ChangeNotifier {
-  static const String baseUrl = "http://150.230.149.68:8000";
-  static const String wsUrl = "ws://150.230.149.68:8000/ws";
+  static const String baseUrl = "http://127.0.0.1:8000";
+  static const String wsUrl = "ws://127.0.0.1:8000/ws";
   // static const String baseUrl = "https://extochatapp.onrender.com";
   // static const String wsUrl = "wss://extochatapp.onrender.com/ws";
   static const int _musicBotUserId = -1;
   static const double _defaultVoiceParticipantVolume = 1.0;
   static const double _defaultMusicBotVolume = 0.2;
 
+
+  Future<Map<String, String>> _authHeaders([Map<String, String>? additional]) async {
+    final headers = <String, String>{};
+    if (accessToken != null) {
+      headers['Authorization'] = 'Bearer $accessToken';
+    }
+    if (additional != null) {
+      headers.addAll(additional);
+    }
+    return headers;
+  }
+  
+  Future<void> tryAutoLogin() async {
+    final prefs = await SharedPreferences.getInstance();
+    accessToken = prefs.getString('access_token');
+    refreshToken = prefs.getString('refresh_token');
+    if (accessToken != null) {
+      // Fetch me
+      try {
+        final response = await http.get(
+          Uri.parse("$baseUrl/users/me"),
+          headers: await _authHeaders(),
+        );
+        if (response.statusCode == 200) {
+          currentUser = User.fromJson(jsonDecode(response.body));
+          _channelsWithUnreadMessages.clear();
+          _channelsWithMentions.clear();
+          if (!isAdmin) {
+            _clearAdminPermissionState(notify: false);
+          }
+          await fetchMentionableUsers(notify: false);
+          await fetchChannels();
+          await fetchMissedChannelNotifications(notify: false);
+          await fetchVoiceChannels();
+          await refreshAudioInputDevices(notify: false);
+          _connectNotificationSocket();
+          notifyListeners();
+        } else {
+          await logout();
+        }
+      } catch (e) {
+        // network error, might still be valid
+      }
+    }
+  }
+
   static const Map<String, dynamic> _rtcConfiguration = {
     'iceServers': [
       {'urls': 'stun:stun.l.google.com:19302'},
     ],
   };
+
+
+  
+  String? accessToken;
+  String? refreshToken;
 
   User? currentUser;
   List<Channel> channels = [];
@@ -140,6 +192,10 @@ class AppState extends ChangeNotifier {
   DateTime? _inputTestLastSampleAt;
   final Map<String, String> _inputTestRawStats = {};
 
+  // ── Speaking-indicator state ──
+  bool _selfSpeaking = false;
+  static const double _speakingThreshold = 0.08;
+
   final Set<int> _mutedChannelIds = <int>{};
 
   AppState() {
@@ -181,7 +237,7 @@ class AppState extends ChangeNotifier {
     final userId = currentUser?.id;
     if (userId == null) return;
     try {
-      final response = await http.get(Uri.parse("$baseUrl/users/me?actor_user_id=$userId"));
+      final response = await http.get(Uri.parse("$baseUrl/users/me"), headers: await _authHeaders());
       if (response.statusCode == 200) {
         currentUser = User.fromJson(jsonDecode(response.body));
         notifyListeners();
@@ -191,11 +247,16 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void logout() {
+  Future<void> logout() async {
     _disconnectTextSocket();
     _disconnectNotificationSocket();
     unawaited(leaveVoiceChannel());
     currentUser = null;
+    accessToken = null;
+    refreshToken = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('access_token');
+    await prefs.remove('refresh_token');
     channels = [];
     activeChannel = null;
     messages = [];
@@ -213,8 +274,8 @@ class AppState extends ChangeNotifier {
     if (userId == null) return "Not logged in";
     try {
       final response = await http.patch(
-        Uri.parse("$baseUrl/users/me?actor_user_id=$userId"),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("$baseUrl/users/me"),
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({"username": username}),
       );
       if (response.statusCode == 200) {
@@ -233,8 +294,9 @@ class AppState extends ChangeNotifier {
     final userId = currentUser?.id;
     if (userId == null) return "Not logged in";
     try {
-      final uri = Uri.parse("$baseUrl/users/me/profile-picture?actor_user_id=$userId");
+      final uri = Uri.parse("$baseUrl/users/me/profile-picture");
       final request = http.MultipartRequest("POST", uri);
+      request.headers.addAll(await _authHeaders());
       request.files.add(http.MultipartFile.fromBytes("file", bytes, filename: filename));
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
@@ -433,8 +495,8 @@ class AppState extends ChangeNotifier {
   Future<String?> register(String username, String password) async {
     try {
       final response = await http.post(
-        Uri.parse("$baseUrl/users/"),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("$baseUrl/auth/register"),
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({"username": username, "password": password}),
       );
 
@@ -444,7 +506,11 @@ class AppState extends ChangeNotifier {
 
       try {
         final data = jsonDecode(response.body);
-        return data['detail'] ?? "Registration failed";
+        final detail = data['detail'];
+        if (detail is List) {
+          return detail.map((e) => e['msg'].toString()).join(', ');
+        }
+        return detail?.toString() ?? "Registration failed";
       } catch (_) {
         return "Server error (Non-JSON): ${response.body}";
       }
@@ -456,14 +522,20 @@ class AppState extends ChangeNotifier {
   Future<String?> login(String username, String password) async {
     try {
       final response = await http.post(
-        Uri.parse("$baseUrl/login/"),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("$baseUrl/auth/login"),
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({"username": username, "password": password}),
       );
 
       if (response.statusCode == 200) {
         _disconnectNotificationSocket();
-        currentUser = User.fromJson(jsonDecode(response.body));
+        final responseData = jsonDecode(response.body);
+        accessToken = responseData['access_token'];
+        refreshToken = responseData['refresh_token'];
+        final prefs = await SharedPreferences.getInstance();
+        if (accessToken != null) await prefs.setString('access_token', accessToken!);
+        if (refreshToken != null) await prefs.setString('refresh_token', refreshToken!);
+        currentUser = User.fromJson(responseData['user']);
         _channelsWithUnreadMessages.clear();
         _channelsWithMentions.clear();
         if (!isAdmin) {
@@ -480,7 +552,11 @@ class AppState extends ChangeNotifier {
       }
 
       final data = jsonDecode(response.body);
-      return data['detail'] ?? "Login failed";
+      final detail = data['detail'];
+      if (detail is List) {
+        return detail.map((e) => e['msg'].toString()).join(', ');
+      }
+      return detail?.toString() ?? "Login failed";
     } catch (_) {
       return "Connection error";
     }
@@ -496,7 +572,7 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      final response = await http.get(Uri.parse("$baseUrl/users/"));
+      final response = await http.get(Uri.parse("$baseUrl/users/"), headers: await _authHeaders());
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
         mentionableUsers = data.map((item) => User.fromJson(item)).toList();
@@ -538,8 +614,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final response = await http.get(
-        Uri.parse("$baseUrl/admin/users/?actor_user_id=$userId"),
-      );
+        Uri.parse("$baseUrl/admin/users/"),
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         adminPermissionsError = "Unable to load users (${response.statusCode})";
         return;
@@ -587,9 +663,9 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.get(
         Uri.parse(
-          "$baseUrl/admin/users/$targetUserId/permissions?actor_user_id=$userId",
+          "$baseUrl/admin/users/$targetUserId/permissions",
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         adminPermissionsError =
             "Unable to load permissions (${response.statusCode})";
@@ -626,8 +702,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final response = await http.patch(
-        Uri.parse("$baseUrl/users/$targetUserId/role?actor_user_id=$userId"),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("$baseUrl/users/$targetUserId/role"),
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({"role": role}),
       );
       if (response.statusCode != 200) {
@@ -706,9 +782,9 @@ class AppState extends ChangeNotifier {
 
       final response = await http.patch(
         Uri.parse(
-          "$baseUrl/admin/users/${selected.userId}/permissions?actor_user_id=$userId",
+          "$baseUrl/admin/users/${selected.userId}/permissions",
         ),
-        headers: {"Content-Type": "application/json"},
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({
           "text_channel_permissions": textPayload,
           "voice_channel_permissions": voicePayload,
@@ -761,9 +837,9 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.get(
         Uri.parse(
-          "$baseUrl/admin/channels/$channelId/permissions?actor_user_id=$userId",
+          "$baseUrl/admin/channels/$channelId/permissions",
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return null;
       }
@@ -784,9 +860,9 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.get(
         Uri.parse(
-          "$baseUrl/admin/voice-channels/$channelId/permissions?actor_user_id=$userId",
+          "$baseUrl/admin/voice-channels/$channelId/permissions",
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return null;
       }
@@ -809,9 +885,9 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.patch(
         Uri.parse(
-          "$baseUrl/admin/channels/$channelId/permissions?actor_user_id=$userId",
+          "$baseUrl/admin/channels/$channelId/permissions",
         ),
-        headers: {"Content-Type": "application/json"},
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({
           "user_permissions": {
             targetUserId.toString(): canView,
@@ -840,9 +916,9 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.patch(
         Uri.parse(
-          "$baseUrl/admin/voice-channels/$channelId/permissions?actor_user_id=$userId",
+          "$baseUrl/admin/voice-channels/$channelId/permissions",
         ),
-        headers: {"Content-Type": "application/json"},
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({
           "user_permissions": {
             targetUserId.toString(): canView,
@@ -870,8 +946,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final response = await http.post(
-        Uri.parse("$baseUrl/channels/?actor_user_id=$userId"),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("$baseUrl/channels/"),
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({
           "name": name,
           "description": description,
@@ -902,8 +978,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final response = await http.post(
-        Uri.parse("$baseUrl/voice-channels/?actor_user_id=$userId"),
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("$baseUrl/voice-channels/"),
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode({
           "name": name,
           "description": description,
@@ -929,8 +1005,8 @@ class AppState extends ChangeNotifier {
     }
 
     final response = await http.get(
-      Uri.parse("$baseUrl/channels/?actor_user_id=$userId"),
-    );
+      Uri.parse("$baseUrl/channels/"),
+     headers: await _authHeaders(),);
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       channels = data.map((c) => Channel.fromJson(c)).toList();
@@ -963,8 +1039,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final response = await http.delete(
-        Uri.parse("$baseUrl/channels/$channelId?actor_user_id=$userId"),
-      );
+        Uri.parse("$baseUrl/channels/$channelId"),
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return false;
       }
@@ -992,8 +1068,8 @@ class AppState extends ChangeNotifier {
     }
 
     final response = await http.get(
-      Uri.parse("$baseUrl/voice-channels/?actor_user_id=$userId"),
-    );
+      Uri.parse("$baseUrl/voice-channels/"),
+     headers: await _authHeaders(),);
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       voiceChannels = data.map((c) => VoiceChannel.fromJson(c)).toList();
@@ -1376,7 +1452,7 @@ class AppState extends ChangeNotifier {
             "limit": "${limit.clamp(1, 100)}",
           },
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
         messageSearchResults = data.map((m) => Message.fromJson(m)).toList();
@@ -1416,7 +1492,7 @@ class AppState extends ChangeNotifier {
             "actor_user_id": "$userId",
           },
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
         pinnedMessages = data.map((m) => Message.fromJson(m)).toList();
@@ -1448,7 +1524,7 @@ class AppState extends ChangeNotifier {
             "actor_user_id": "$userId",
           },
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return false;
       }
@@ -1476,7 +1552,7 @@ class AppState extends ChangeNotifier {
             "actor_user_id": "$userId",
           },
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return false;
       }
@@ -1512,12 +1588,9 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final uri = Uri.parse("$baseUrl/channels/$channelId/attachments").replace(
-        queryParameters: {
-          "actor_user_id": "$userId",
-        },
-      );
+      final uri = Uri.parse("$baseUrl/channels/$channelId/attachments");
       final request = http.MultipartRequest("POST", uri);
+      request.headers.addAll(await _authHeaders());
       request.fields["content"] = (content ?? "").trim();
       if (parentId != null) {
         request.fields["parent_id"] = "$parentId";
@@ -1594,9 +1667,9 @@ class AppState extends ChangeNotifier {
 
     final response = await http.get(
       Uri.parse(
-        "$baseUrl/channels/$channelId/messages/?actor_user_id=$userId",
+        "$baseUrl/channels/$channelId/messages/",
       ),
-    );
+     headers: await _authHeaders(),);
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       final fetchedMessages = data.map((m) => Message.fromJson(m)).toList();
@@ -1623,9 +1696,9 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.get(
         Uri.parse(
-          "$baseUrl/notifications/channel-unread?actor_user_id=$userId",
+          "$baseUrl/notifications/channel-unread",
         ),
-      );
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return;
       }
@@ -1673,7 +1746,7 @@ class AppState extends ChangeNotifier {
         Uri.parse("$baseUrl/channels/$channelId/read-state").replace(
           queryParameters: {"actor_user_id": "$userId"},
         ),
-        headers: {"Content-Type": "application/json"},
+        headers: await _authHeaders({"Content-Type": "application/json"}),
         body: jsonEncode(body),
       );
     } catch (_) {
@@ -1714,7 +1787,7 @@ class AppState extends ChangeNotifier {
     }
 
     final socket = createWsChannel(
-      Uri.parse("$wsUrl/${channel.id}/$userId"),
+      Uri.parse("$wsUrl/${channel.id}?token=$accessToken"),
     );
     _channel = socket;
     _startTextPing();
@@ -1871,7 +1944,7 @@ class AppState extends ChangeNotifier {
     }
 
     final socket = createWsChannel(
-      Uri.parse("$wsUrl/notifications/$userId"),
+      Uri.parse("$wsUrl/notifications?token=$accessToken"),
     );
     _notificationChannel = socket;
     _startNotificationPing();
@@ -2257,7 +2330,7 @@ class AppState extends ChangeNotifier {
       failedStep = 'signal connection';
       activeVoiceChannel = channel;
       final signalChannel = createWsChannel(
-        Uri.parse("$wsUrl/voice/${channel.id}/${currentUser!.id}"),
+        Uri.parse("$wsUrl/voice/${channel.id}?token=$accessToken"),
       );
       await signalChannel.ready;
       _voiceSignalChannel = signalChannel;
@@ -2472,6 +2545,19 @@ class AppState extends ChangeNotifier {
           final current = voiceParticipants[userId];
           if (current != null) {
             voiceParticipants[userId] = current.copyWith(isMuted: isMuted);
+          }
+          notifyListeners();
+        }
+        return;
+      }
+
+      if (type == 'speaking_state') {
+        final userId = payload['user_id'];
+        final isSpeaking = payload['is_speaking'] == true;
+        if (userId is int) {
+          final current = voiceParticipants[userId];
+          if (current != null) {
+            voiceParticipants[userId] = current.copyWith(isSpeaking: isSpeaking);
           }
           notifyListeners();
         }
@@ -3352,7 +3438,16 @@ class AppState extends ChangeNotifier {
     final selfParticipant = voiceParticipants[currentUser!.id];
     if (selfParticipant != null) {
       voiceParticipants[currentUser!.id] =
-          selfParticipant.copyWith(isMuted: isSelfMuted);
+          selfParticipant.copyWith(isMuted: isSelfMuted, isSpeaking: isSelfMuted ? false : null);
+    }
+
+    // Clear speaking state immediately when muting.
+    if (isSelfMuted && _selfSpeaking) {
+      _selfSpeaking = false;
+      _sendVoiceSignal({
+        'type': 'speaking_state',
+        'is_speaking': false,
+      });
     }
 
     _sendVoiceSignal({
@@ -3473,6 +3568,7 @@ class AppState extends ChangeNotifier {
 
     voiceParticipants.clear();
     _voiceParticipantVolumes.clear();
+    _selfSpeaking = false;
     _screenSharingUserIds.clear();
     _screenShareSenders.clear();
     _peerConnectionStates.clear();
@@ -3617,8 +3713,8 @@ class AppState extends ChangeNotifier {
 
     try {
       final response = await http.delete(
-        Uri.parse("$baseUrl/voice-channels/$channelId?actor_user_id=$userId"),
-      );
+        Uri.parse("$baseUrl/voice-channels/$channelId"),
+       headers: await _authHeaders(),);
       if (response.statusCode != 200) {
         return false;
       }
@@ -4032,6 +4128,32 @@ class AppState extends ChangeNotifier {
 
       if (hasMeaningfulChange) {
         notifyListeners();
+      }
+
+      // ── Speaking indicator: detect local speaking transition ──
+      final nowSpeaking = smoothedMicLevel > _speakingThreshold && !isSelfMuted;
+      if (nowSpeaking != _selfSpeaking) {
+        _selfSpeaking = nowSpeaking;
+
+        // Update local participant immediately for instant self-feedback.
+        final selfId = currentUser?.id;
+        if (selfId != null) {
+          final selfParticipant = voiceParticipants[selfId];
+          if (selfParticipant != null) {
+            voiceParticipants[selfId] =
+                selfParticipant.copyWith(isSpeaking: nowSpeaking);
+          }
+        }
+
+        // Broadcast to other users via voice signal channel.
+        _sendVoiceSignal({
+          'type': 'speaking_state',
+          'is_speaking': nowSpeaking,
+        });
+
+        if (!hasMeaningfulChange) {
+          notifyListeners();
+        }
       }
     } finally {
       _voiceDiagnosticsInFlight = false;

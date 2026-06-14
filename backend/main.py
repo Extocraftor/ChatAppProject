@@ -3,6 +3,19 @@ import base64
 import json
 import logging
 import os
+
+from auth import (
+    create_access_token,
+    create_refresh_token,
+    get_current_user,
+    get_ws_user,
+    verify_refresh_token,
+    SECRET_KEY,
+)
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 import re
 import tempfile
 from uuid import uuid4
@@ -152,6 +165,26 @@ def _ensure_schema_columns() -> None:
             conn.execute(
                 text("ALTER TABLE users ADD COLUMN profile_picture_url VARCHAR")
             )
+        if "email" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR UNIQUE"))
+        if "is_email_verified" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN is_email_verified BOOLEAN DEFAULT FALSE NOT NULL"))
+        if "email_verification_token" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_token VARCHAR"))
+        if "email_token_expires_at" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN email_token_expires_at TIMESTAMP"))
+        if "password_reset_token" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_token VARCHAR"))
+        if "password_reset_expires_at" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_expires_at TIMESTAMP"))
+        if "failed_login_attempts" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0 NOT NULL"))
+        if "locked_until" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN locked_until TIMESTAMP"))
+        if "last_login_at" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP"))
+        if "created_at" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL"))
 
         channel_columns = {
             column["name"] for column in inspector.get_columns("channels")
@@ -190,6 +223,8 @@ def _ensure_schema_columns() -> None:
                     "ALTER TABLE messages ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT FALSE"
                 )
             )
+        if "edited_at" not in message_columns:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN edited_at TIMESTAMP"))
         if "pinned_at" not in message_columns:
             conn.execute(text("ALTER TABLE messages ADD COLUMN pinned_at TIMESTAMP"))
         if "pinned_by_user_id" not in message_columns:
@@ -257,6 +292,17 @@ _ensure_schema_columns()
 _seed_existing_user_roles()
 
 app = FastAPI()
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests. Please try again later."},
+    )
 logger = logging.getLogger("uvicorn.error")
 
 app.add_middleware(
@@ -322,9 +368,13 @@ class NotificationConnectionManager:
 
     async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
-        if user_id not in self.active_connections:
+        is_new_connection = user_id not in self.active_connections
+        if is_new_connection:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
+        if is_new_connection:
+            import asyncio
+            asyncio.create_task(self.broadcast_user_status(user_id, True))
 
     def disconnect(self, websocket: WebSocket, user_id: int):
         connections = self.active_connections.get(user_id)
@@ -334,6 +384,8 @@ class NotificationConnectionManager:
             connections.remove(websocket)
         if not connections:
             self.active_connections.pop(user_id, None)
+            import asyncio
+            asyncio.create_task(self.broadcast_user_status(user_id, False))
 
     async def send_to_user(self, user_id: int, payload: Dict[str, Any]):
         connections = self.active_connections.get(user_id, [])
@@ -354,6 +406,17 @@ class NotificationConnectionManager:
         connected_user_ids = list(self.active_connections.keys())
         for recipient_id in connected_user_ids:
             await self.send_to_user(recipient_id, payload)
+
+    async def broadcast_user_status(self, user_id: int, is_online: bool):
+        payload = {
+            "type": "user_status",
+            "user_id": user_id,
+            "is_online": is_online,
+        }
+        connected_user_ids = list(self.active_connections.keys())
+        for recipient_id in connected_user_ids:
+            if recipient_id != user_id:
+                await self.send_to_user(recipient_id, payload)
 
     async def broadcast_voice_state(self, db: Session, voice_channel_id: int):
         """Broadcasts the current participant list of a voice channel to all connected notification users who can see it."""
@@ -1226,18 +1289,16 @@ def _can_pin_messages(user: models.User) -> bool:
     return _is_staff(user)
 
 
-def _ensure_actor_user(db: Session, actor_user_id: int) -> models.User:
-    actor_user = db.query(models.User).filter(models.User.id == actor_user_id).first()
-    if not actor_user:
+def _ensure_actor_user(db: Session, current_user: models.User) -> models.User:
+    if not current_user:
         raise HTTPException(status_code=404, detail="Actor user not found")
-    return actor_user
+    return current_user
 
 
-def _ensure_admin_actor(db: Session, actor_user_id: int) -> models.User:
-    actor_user = _ensure_actor_user(db, actor_user_id)
-    if not _is_admin(actor_user):
+def _ensure_admin_actor(db: Session, current_user: models.User) -> models.User:
+    if not _is_admin(current_user):
         raise HTTPException(status_code=403, detail="Only admins can perform this action")
-    return actor_user
+    return current_user
 
 
 def _default_channel_visibility_for_role(role: str | None, admin_only: bool) -> bool:
@@ -2206,7 +2267,100 @@ def _extract_youtube_stream(url: str, format_override: str | None = None) -> tup
 # --- REST ENDPOINTS ---
 
 
-@app.post("/users/", response_model=schemas.UserSchema)
+
+@app.post("/auth/register", response_model=schemas.UserSchema)
+@limiter.limit("3/hour")
+def auth_register(request: Request, user_data: schemas.RegisterRequest, db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.username == user_data.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    if user_data.email:
+        existing_email = db.query(models.User).filter(models.User.email == user_data.email).first()
+        if existing_email:
+            raise HTTPException(status_code=400, detail="Email already registered")
+    
+    hashed_pwd = get_password_hash(user_data.password)
+    role = _resolve_user_role(user_data.username, db)
+    db_user = models.User(
+        username=user_data.username,
+        hashed_password=hashed_pwd,
+        role=role,
+        email=user_data.email if user_data.email else None,
+    )
+    db.add(db_user)
+    db.commit()
+    _ensure_permissions_for_new_user(db, db_user.id)
+    db.refresh(db_user)
+    return db_user
+
+@app.post("/auth/login", response_model=schemas.TokenResponse)
+@limiter.limit("10/minute")
+def auth_login(request: Request, login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.username == login_data.username).first()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    if db_user.locked_until and db_user.locked_until > datetime.utcnow():
+        remaining = int((db_user.locked_until - datetime.utcnow()).total_seconds())
+        raise HTTPException(
+            status_code=423,
+            detail=f"Account temporarily locked. Try again in {remaining} seconds.",
+        )
+    
+    if not verify_password(login_data.password, db_user.hashed_password):
+        db_user.failed_login_attempts = (db_user.failed_login_attempts or 0) + 1
+        if db_user.failed_login_attempts >= 5:
+            db_user.locked_until = datetime.utcnow() + timedelta(minutes=15)
+            db_user.failed_login_attempts = 0
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    db_user.failed_login_attempts = 0
+    db_user.locked_until = None
+    db_user.last_login_at = datetime.utcnow()
+    db.commit()
+    
+    access_token = create_access_token(db_user.id)
+    refresh_token = create_refresh_token(db_user.id)
+    
+    return schemas.TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=schemas.UserSchema.model_validate(db_user),
+    )
+
+@app.post("/auth/refresh", response_model=schemas.AccessTokenResponse)
+@limiter.limit("30/minute")
+def auth_refresh(request: Request, refresh_data: schemas.RefreshRequest, db: Session = Depends(get_db)):
+    user_id = verify_refresh_token(refresh_data.refresh_token)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="User not found")
+    
+    new_access_token = create_access_token(db_user.id)
+    return schemas.AccessTokenResponse(access_token=new_access_token)
+
+@app.post("/auth/change-password")
+def auth_change_password(
+    password_data: schemas.PasswordChangeRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not verify_password(password_data.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    current_user.hashed_password = get_password_hash(password_data.new_password)
+    db.commit()
+    return {"detail": "Password changed successfully"}
+
+@app.get("/users/online")
+def get_online_users(current_user: models.User = Depends(get_current_user)):
+    online_user_ids = list(notification_manager.active_connections.keys())
+    return {"online_user_ids": online_user_ids}
+
+
+@app.post("/users/", response_model=schemas.UserSchema, deprecated=True)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     existing_user = db.query(models.User).filter(models.User.username == user.username).first()
     if existing_user:
@@ -2231,17 +2385,17 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/users/me", response_model=schemas.UserSchema)
-def get_me(actor_user_id: int, db: Session = Depends(get_db)):
-    return _ensure_actor_user(db, actor_user_id)
+def get_me(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _ensure_actor_user(db, current_user)
 
 
 @app.patch("/users/me", response_model=schemas.UserSchema)
-def update_me(
-    actor_user_id: int,
+async def update_me(
     user_update: schemas.UserUpdate,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     if user_update.username is not None:
         existing = db.query(models.User).filter(models.User.username == user_update.username).first()
         if existing and existing.id != actor_user.id:
@@ -2258,11 +2412,11 @@ def update_me(
 
 @app.post("/users/me/profile-picture", response_model=schemas.UserSchema)
 async def upload_profile_picture(
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     payload = await file.read()
     if not payload:
         raise HTTPException(status_code=400, detail="File is empty")
@@ -2271,6 +2425,10 @@ async def upload_profile_picture(
 
     original_name = file.filename or "pfp.png"
     _, extension = os.path.splitext(original_name)
+    extension = extension.lower()
+    allowed_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    if extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
     stored_name = f"pfp_{actor_user.id}_{uuid4().hex[:8]}{extension}"
     storage_path = os.path.join(ATTACHMENT_UPLOAD_DIR, stored_name)
 
@@ -2293,10 +2451,10 @@ def list_users(db: Session = Depends(get_db)):
 def update_user_role(
     target_user_id: int,
     role_update: schemas.UserRoleUpdate,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     if actor_user.role != ROLE_ADMIN:
         raise HTTPException(status_code=403, detail="Only admins can update roles")
 
@@ -2321,8 +2479,8 @@ def update_user_role(
 
 
 @app.get("/admin/users/", response_model=List[schemas.UserSchema])
-def admin_list_users(actor_user_id: int, db: Session = Depends(get_db)):
-    _ensure_admin_actor(db, actor_user_id)
+def admin_list_users(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _ensure_admin_actor(db, current_user)
     return db.query(models.User).order_by(models.User.username.asc()).all()
 
 
@@ -2332,10 +2490,10 @@ def admin_list_users(actor_user_id: int, db: Session = Depends(get_db)):
 )
 def admin_get_user_permissions(
     target_user_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_admin_actor(db, actor_user_id)
+    _ensure_admin_actor(db, current_user)
     target_user = db.query(models.User).filter(models.User.id == target_user_id).first()
     if not target_user:
         raise HTTPException(status_code=404, detail="Target user not found")
@@ -2350,10 +2508,10 @@ def admin_get_user_permissions(
 def admin_update_user_permissions(
     target_user_id: int,
     permission_update: schemas.UserChannelPermissionsUpdate,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_admin_actor(db, actor_user_id)
+    _ensure_admin_actor(db, current_user)
     target_user = db.query(models.User).filter(models.User.id == target_user_id).first()
     if not target_user:
         raise HTTPException(status_code=404, detail="Target user not found")
@@ -2416,10 +2574,10 @@ def admin_update_user_permissions(
 )
 def admin_get_text_channel_permissions(
     channel_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_admin_actor(db, actor_user_id)
+    _ensure_admin_actor(db, current_user)
     channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Text channel not found")
@@ -2433,10 +2591,10 @@ def admin_get_text_channel_permissions(
 def admin_update_text_channel_permissions(
     channel_id: int,
     permission_update: schemas.ChannelPermissionsUpdate,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_admin_actor(db, actor_user_id)
+    _ensure_admin_actor(db, current_user)
     channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Text channel not found")
@@ -2491,10 +2649,10 @@ def admin_update_text_channel_permissions(
 )
 def admin_get_voice_channel_permissions(
     voice_channel_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_admin_actor(db, actor_user_id)
+    _ensure_admin_actor(db, current_user)
     channel = (
         db.query(models.VoiceChannel)
         .filter(models.VoiceChannel.id == voice_channel_id)
@@ -2512,10 +2670,10 @@ def admin_get_voice_channel_permissions(
 def admin_update_voice_channel_permissions(
     voice_channel_id: int,
     permission_update: schemas.ChannelPermissionsUpdate,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_admin_actor(db, actor_user_id)
+    _ensure_admin_actor(db, current_user)
     channel = (
         db.query(models.VoiceChannel)
         .filter(models.VoiceChannel.id == voice_channel_id)
@@ -2581,10 +2739,10 @@ def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
     response_model=List[schemas.ChannelNotificationStateSchema],
 )
 def list_unread_channel_notifications(
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     visible_channel_ids = _visible_text_channel_ids_for_user(db, actor_user)
     if not visible_channel_ids:
         return []
@@ -2634,18 +2792,18 @@ def list_unread_channel_notifications(
 @app.post("/channels/", response_model=schemas.ChannelSchema)
 def create_channel(
     channel: schemas.ChannelCreate,
-    actor_user_id: int | None = None,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     actor_user = None
     creator_user_id = None
-    if actor_user_id is None:
+    if current_user.id is None:
         raise HTTPException(
             status_code=403,
             detail="Only moderators/admins can create channels",
         )
 
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     creator_user_id = actor_user.id
     if not _is_staff(actor_user):
         raise HTTPException(
@@ -2676,8 +2834,8 @@ def create_channel(
 
 
 @app.get("/channels/", response_model=List[schemas.ChannelSchema])
-def list_channels(actor_user_id: int, db: Session = Depends(get_db)):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+def list_channels(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    actor_user = current_user
     if _is_admin(actor_user):
         return db.query(models.Channel).all()
 
@@ -2701,8 +2859,8 @@ def list_channels(actor_user_id: int, db: Session = Depends(get_db)):
 
 
 @app.delete("/channels/{channel_id}")
-async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+async def delete_channel(channel_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    actor_user = current_user
 
     db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
     if not db_channel:
@@ -2732,13 +2890,13 @@ async def delete_channel(channel_id: int, actor_user_id: int, db: Session = Depe
 @app.post("/channels/{channel_id}/attachments", response_model=schemas.MessageSchema)
 async def upload_channel_attachment(
     channel_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     file: UploadFile = File(...),
     content: str = Form(""),
     parent_id: int | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
     if not _can_view_text_channel(db, actor_user, channel_id):
         raise HTTPException(status_code=403, detail="You do not have access to this channel")
@@ -2770,6 +2928,10 @@ async def upload_channel_attachment(
 
     original_name = os.path.basename((file.filename or "attachment").strip()) or "attachment"
     _, extension = os.path.splitext(original_name)
+    extension = extension.lower()
+    allowed_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mp3", ".wav", ".ogg", ".pdf", ".txt", ".csv", ".json", ".doc", ".docx", ".xls", ".xlsx", ".zip", ".tar", ".gz"}
+    if extension and extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
     stored_name = f"{uuid4().hex}{extension[:16]}"
     storage_path = os.path.join(ATTACHMENT_UPLOAD_DIR, stored_name)
 
@@ -2808,13 +2970,19 @@ async def upload_channel_attachment(
 
 
 @app.get("/channels/{channel_id}/messages/", response_model=List[schemas.MessageSchema])
-def get_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+def get_messages(
+    channel_id: int, 
+    before: int | None = None,
+    limit: int = 50,
+    current_user: models.User = Depends(get_current_user), 
+    db: Session = Depends(get_db),
+):
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
     if not _can_view_text_channel(db, actor_user, channel_id):
         raise HTTPException(status_code=403, detail="You do not have access to this channel")
 
-    return (
+    query = (
         db.query(models.Message)
         .options(
             joinedload(models.Message.user),
@@ -2822,19 +2990,22 @@ def get_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_
             joinedload(models.Message.pinned_by),
         )
         .filter(models.Message.channel_id == channel_id)
-        .order_by(models.Message.timestamp.asc())
-        .all()
     )
+    if before is not None:
+        query = query.filter(models.Message.id < before)
+    safe_limit = max(1, min(limit, 100))
+    messages = query.order_by(models.Message.id.desc()).limit(safe_limit).all()
+    return messages[::-1]
 
 
 @app.post("/channels/{channel_id}/read-state")
 def mark_channel_read(
     channel_id: int,
     read_state_update: schemas.ChannelReadStateUpdate,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
 
     db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
@@ -2887,12 +3058,12 @@ def mark_channel_read(
 )
 def search_messages(
     channel_id: int,
-    actor_user_id: int,
     query: str,
     limit: int = 50,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
     if not _can_view_text_channel(db, actor_user, channel_id):
         raise HTTPException(status_code=403, detail="You do not have access to this channel")
@@ -2922,8 +3093,8 @@ def search_messages(
 
 
 @app.get("/channels/{channel_id}/pins", response_model=List[schemas.MessageSchema])
-def list_pinned_messages(channel_id: int, actor_user_id: int, db: Session = Depends(get_db)):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+def list_pinned_messages(channel_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
     if not _can_view_text_channel(db, actor_user, channel_id):
         raise HTTPException(status_code=403, detail="You do not have access to this channel")
@@ -2948,10 +3119,10 @@ def list_pinned_messages(channel_id: int, actor_user_id: int, db: Session = Depe
 async def pin_message(
     channel_id: int,
     message_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
     if not _can_view_text_channel(db, actor_user, channel_id):
         raise HTTPException(status_code=403, detail="You do not have access to this channel")
@@ -3002,10 +3173,10 @@ async def pin_message(
 async def unpin_message(
     channel_id: int,
     message_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     _ensure_text_channel_permissions_for_user(db, actor_user.id)
     if not _can_view_text_channel(db, actor_user, channel_id):
         raise HTTPException(status_code=403, detail="You do not have access to this channel")
@@ -3050,18 +3221,18 @@ async def unpin_message(
 @app.post("/voice-channels/", response_model=schemas.VoiceChannelSchema)
 def create_voice_channel(
     channel: schemas.VoiceChannelCreate,
-    actor_user_id: int | None = None,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     actor_user = None
     creator_user_id = None
-    if actor_user_id is None:
+    if current_user.id is None:
         raise HTTPException(
             status_code=403,
             detail="Only moderators/admins can create channels",
         )
 
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     creator_user_id = actor_user.id
     if not _is_staff(actor_user):
         raise HTTPException(
@@ -3105,8 +3276,8 @@ def create_voice_channel(
 
 
 @app.get("/voice-channels/", response_model=List[schemas.VoiceChannelSchema])
-def list_voice_channels(actor_user_id: int, db: Session = Depends(get_db)):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+def list_voice_channels(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    actor_user = current_user
     if _is_admin(actor_user):
         return db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
 
@@ -3137,10 +3308,10 @@ def list_voice_channels(actor_user_id: int, db: Session = Depends(get_db)):
 @app.delete("/voice-channels/{voice_channel_id}")
 async def delete_voice_channel(
     voice_channel_id: int,
-    actor_user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    actor_user = _ensure_actor_user(db, actor_user_id)
+    actor_user = current_user
     db_voice_channel = (
         db.query(models.VoiceChannel)
         .filter(models.VoiceChannel.id == voice_channel_id)
@@ -3305,18 +3476,24 @@ async def audio_proxy(request: Request, url: str):
 # --- WEBSOCKET ENDPOINTS ---
 
 
-@app.websocket("/ws/notifications/{user_id}")
+@app.websocket("/ws/notifications")
 async def notification_websocket_endpoint(
     websocket: WebSocket,
-    user_id: int,
     db: Session = Depends(get_db),
 ):
-    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    db_user = await get_ws_user(websocket, db)
     if not db_user:
-        await websocket.close(code=1008)
         return
+    user_id = db_user.id
 
     await notification_manager.connect(websocket, user_id)
+    
+    # Broadcast online status
+    for connection in list(notification_manager.active_connections.values()):
+        try:
+            await connection.send_text(json.dumps({"type": "user_online", "user_id": user_id}))
+        except Exception:
+            pass
 
     try:
         while True:
@@ -3345,19 +3522,24 @@ async def notification_websocket_endpoint(
         logger.exception("notification websocket error user=%s", user_id)
     finally:
         notification_manager.disconnect(websocket, user_id)
+        # Broadcast offline status
+        for connection in list(notification_manager.active_connections.values()):
+            try:
+                await connection.send_text(json.dumps({"type": "user_offline", "user_id": user_id}))
+            except Exception:
+                pass
 
 
-@app.websocket("/ws/{channel_id}/{user_id}")
+@app.websocket("/ws/{channel_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     channel_id: int,
-    user_id: int,
     db: Session = Depends(get_db),
 ):
-    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    db_user = await get_ws_user(websocket, db)
     if not db_user:
-        await websocket.close(code=1008)
         return
+    user_id = db_user.id
 
     db_channel = db.query(models.Channel).filter(models.Channel.id == channel_id).first()
     if not db_channel:
@@ -3426,6 +3608,7 @@ async def websocket_endpoint(
                     db_message.content = normalized_content
                     db_message.mentioned_user_ids_json = json.dumps(mentioned_user_ids)
                     db_message.mentioned_usernames_json = json.dumps(mentioned_usernames)
+                    db_message.edited_at = datetime.utcnow()
                     db.commit()
                     db.refresh(db_message)
 
@@ -3437,6 +3620,7 @@ async def websocket_endpoint(
                             "mentioned_user_ids": db_message.mentioned_user_ids,
                             "mentioned_usernames": db_message.mentioned_usernames,
                             "author_profile_picture_url": db_message.author_profile_picture_url,
+                            "edited_at": str(db_message.edited_at),
                         }
                     )
                 elif msg_type == "delete_message":
@@ -3463,6 +3647,16 @@ async def websocket_endpoint(
                             "id": msg_id,
                         }
                     )
+                elif msg_type == "typing":
+                    await manager.broadcast(
+                        channel_id,
+                        json.dumps({
+                            "type": "typing",
+                            "user_id": user_id,
+                            "username": username,
+                        }),
+                    )
+                    continue
                 elif msg_type == "ping":
                     pong_payload: Dict[str, Any] = {"type": "pong"}
                     ping_id = data_json.get("ping_id")
@@ -3527,17 +3721,16 @@ async def websocket_endpoint(
         manager.disconnect(websocket, channel_id)
 
 
-@app.websocket("/ws/voice/{voice_channel_id}/{user_id}")
+@app.websocket("/ws/voice/{voice_channel_id}")
 async def voice_websocket_endpoint(
     websocket: WebSocket,
     voice_channel_id: int,
-    user_id: int,
     db: Session = Depends(get_db),
 ):
-    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    db_user = await get_ws_user(websocket, db)
     if not db_user:
-        await websocket.close(code=1008)
         return
+    user_id = db_user.id
 
     db_voice_channel = (
         db.query(models.VoiceChannel)
@@ -3574,6 +3767,7 @@ async def voice_websocket_endpoint(
             "type": "participant_joined",
             "user_id": user_id,
             "username": username,
+            "profile_picture_url": profile_picture_url,
             "is_muted": voice_manager.mute_states.get(voice_channel_id, {}).get(user_id, False),
             "is_screen_sharing": voice_manager.screen_share_states.get(voice_channel_id, {}).get(user_id, False),
             "is_bot": False,
@@ -3624,6 +3818,18 @@ async def voice_websocket_endpoint(
                         "user_id": user_id,
                         "is_muted": is_muted,
                     },
+                )
+
+            elif msg_type == "speaking_state":
+                is_speaking = bool(data_json.get("is_speaking", False))
+                await voice_manager.broadcast(
+                    voice_channel_id,
+                    {
+                        "type": "speaking_state",
+                        "user_id": user_id,
+                        "is_speaking": is_speaking,
+                    },
+                    exclude_user_id=user_id,
                 )
 
             elif msg_type == "screen_share_state":

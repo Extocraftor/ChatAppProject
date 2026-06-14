@@ -20,6 +20,16 @@ class User(Base):
     hashed_password = Column(String)
     role = Column(String, default="member", nullable=False)
     profile_picture_url = Column(String, nullable=True)
+    email = Column(String, unique=True, nullable=True, index=True)
+    is_email_verified = Column(Boolean, default=False, nullable=False)
+    email_verification_token = Column(String, nullable=True)
+    email_token_expires_at = Column(DateTime, nullable=True)
+    password_reset_token = Column(String, nullable=True)
+    password_reset_expires_at = Column(DateTime, nullable=True)
+    failed_login_attempts = Column(Integer, default=0, nullable=False)
+    locked_until = Column(DateTime, nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     messages = relationship(
         "Message",
         back_populates="user",
@@ -121,6 +131,7 @@ class Message(Base):
     id = Column(Integer, primary_key=True, index=True)
     content = Column(String)
     timestamp = Column(DateTime, default=datetime.utcnow)
+    edited_at = Column(DateTime, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     channel_id = Column(Integer, ForeignKey("channels.id"))
     parent_id = Column(Integer, ForeignKey("messages.id"), nullable=True)

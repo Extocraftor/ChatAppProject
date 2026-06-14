@@ -12,3 +12,5 @@ yt-dlp
 httpx
 spotipy
 python-multipart
+python-jose[cryptography]
+slowapi

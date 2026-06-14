@@ -11,7 +11,7 @@ void main() {
 
   runApp(
     ChangeNotifierProvider(
-      create: (context) => AppState(),
+      create: (context) => AppState()..tryAutoLogin(),
       child: const HarmonyApp(),
     ),
   );

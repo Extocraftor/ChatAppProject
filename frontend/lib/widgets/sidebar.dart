@@ -766,10 +766,29 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
               child: Row(
                 children: [
                   if (!isMusicBot)
-                    Container(
-                      width: 20,
-                      height: 20,
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 22,
+                      height: 22,
                       margin: const EdgeInsets.only(right: 6),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: widget.participant.isSpeaking
+                              ? const Color(0xFF43B581)
+                              : Colors.transparent,
+                          width: 1.5,
+                        ),
+                        boxShadow: widget.participant.isSpeaking
+                            ? [
+                                BoxShadow(
+                                  color: const Color(0xFF43B581).withOpacity(0.6),
+                                  blurRadius: 6,
+                                  spreadRadius: 1,
+                                ),
+                              ]
+                            : [],
+                      ),
                       child: CircleAvatar(
                         radius: 10,
                         backgroundColor: const Color(0xFF5865F2),
