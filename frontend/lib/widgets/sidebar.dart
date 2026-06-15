@@ -656,7 +656,7 @@ class _VoiceChannelTile extends StatelessWidget {
   ) async {
     final state = context.read<AppState>();
     if (isActive) {
-      await state.leaveVoiceChannel();
+      state.toggleVoiceChannelFocus();
       return;
     }
 

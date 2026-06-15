@@ -3289,7 +3289,10 @@ def create_voice_channel(
 def list_voice_channels(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     actor_user = current_user
     if _is_admin(actor_user):
-        return db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+        channels = db.query(models.VoiceChannel).order_by(models.VoiceChannel.name.asc()).all()
+        for channel in channels:
+            channel.participants = voice_manager.participants(channel.id)
+        return channels
 
     _ensure_voice_channel_permissions_for_user(db, actor_user.id)
     allowed_channel_ids = [

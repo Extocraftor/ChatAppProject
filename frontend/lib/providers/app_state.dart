@@ -429,6 +429,12 @@ class AppState extends ChangeNotifier {
       Set<int>.unmodifiable(_screenSharingUserIds);
   bool get isScreenSharing => _localScreenStream != null;
   bool get isScreenShareStarting => _screenShareStarting;
+  bool isVoiceChannelFocused = false;
+
+  void toggleVoiceChannelFocus() {
+    isVoiceChannelFocused = !isVoiceChannelFocused;
+    notifyListeners();
+  }
   Map<int, RTCPeerConnectionState> get peerConnectionStates =>
       Map.unmodifiable(_peerConnectionStates);
   bool get hasLocalAudioTrack =>
@@ -2451,6 +2457,8 @@ class AppState extends ChangeNotifier {
     if (!forceRejoin &&
         activeVoiceChannel?.id == channel.id &&
         _voiceSignalChannel != null) {
+      isVoiceChannelFocused = true;
+      notifyListeners();
       return true;
     }
 
@@ -3736,7 +3744,9 @@ class AppState extends ChangeNotifier {
     _selfSpeaking = false;
     _screenSharingUserIds.clear();
     _screenShareSenders.clear();
+    _voicePingMs = null;
     _peerConnectionStates.clear();
+    isVoiceChannelFocused = false;
 
     if (notify) {
       notifyListeners();

@@ -23,6 +23,7 @@ class MainLayout extends StatelessWidget {
     final activeChannelId =
         context.select<AppState, int?>((s) => s.activeChannel?.id);
     final messages = context.watch<AppState>().messages;
+    final isVoiceChannelFocused = context.watch<AppState>().isVoiceChannelFocused;
     final messageCount = messages.length;
 
     return Scaffold(
@@ -77,23 +78,31 @@ class MainLayout extends StatelessWidget {
                 ),
                 const _ScreenShareStage(),
                 Expanded(
-                  child: ScrollablePositionedList.builder(
-                    itemScrollController:
-                        context.read<AppState>().itemScrollController,
-                    itemPositionsListener:
-                        context.read<AppState>().itemPositionsListener,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: messageCount,
-                    itemBuilder: (context, index) {
-                      if (index < 0 || index >= messages.length) {
-                        return const SizedBox.shrink();
-                      }
-                      return MessageItem(message: messages[index]);
-                    },
-                  ),
+                  child: isVoiceChannelFocused 
+                    ? const _VoiceChannelGrid()
+                    : Column(
+                        children: [
+                          Expanded(
+                            child: ScrollablePositionedList.builder(
+                              itemScrollController:
+                                  context.read<AppState>().itemScrollController,
+                              itemPositionsListener:
+                                  context.read<AppState>().itemPositionsListener,
+                              padding: const EdgeInsets.all(16),
+                              itemCount: messageCount,
+                              itemBuilder: (context, index) {
+                                if (index < 0 || index >= messages.length) {
+                                  return const SizedBox.shrink();
+                                }
+                                return MessageItem(message: messages[index]);
+                              },
+                            ),
+                          ),
+                          const _TypingIndicator(),
+                          const MessageInput(),
+                        ],
+                      ),
                 ),
-                const _TypingIndicator(),
-                const MessageInput(),
               ],
             ),
           ),
@@ -759,6 +768,113 @@ class _TypingIndicator extends StatelessWidget {
             fontStyle: FontStyle.italic,
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _VoiceChannelGrid extends StatelessWidget {
+  const _VoiceChannelGrid();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final channel = state.activeVoiceChannel;
+    if (channel == null) return const SizedBox.shrink();
+
+    final allParticipants = channel.participants;
+
+    int crossAxisCount = 1;
+    final count = allParticipants.length;
+    if (count > 1 && count <= 4) {
+      crossAxisCount = 2;
+    } else if (count > 4 && count <= 9) {
+      crossAxisCount = 3;
+    } else if (count > 9) {
+      crossAxisCount = 4;
+    }
+
+    return Container(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      padding: const EdgeInsets.all(16),
+      child: GridView.builder(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: crossAxisCount,
+          crossAxisSpacing: 16,
+          mainAxisSpacing: 16,
+          childAspectRatio: 1.5,
+        ),
+        itemCount: count,
+        itemBuilder: (context, index) {
+          final p = allParticipants[index];
+          final isSpeaking = p.isSpeaking;
+          final isMuted = p.isMuted;
+
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final double avatarRadius = constraints.maxWidth > constraints.maxHeight 
+                ? constraints.maxHeight * 0.3 
+                : constraints.maxWidth * 0.3;
+
+              return Container(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: isSpeaking
+                      ? Border.all(color: Colors.greenAccent, width: 3)
+                      : null,
+                ),
+                child: Stack(
+                  children: [
+                    Center(
+                      child: CircleAvatar(
+                        radius: avatarRadius,
+                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    backgroundImage: p.profilePictureUrl != null
+                        ? NetworkImage(state.resolveMediaUrl(p.profilePictureUrl!))
+                        : null,
+                    child: p.profilePictureUrl == null
+                        ? Text(
+                            p.username.isNotEmpty ? p.username[0].toUpperCase() : '?',
+                            style: TextStyle(fontSize: avatarRadius, color: Colors.white),
+                          )
+                        : null,
+                  ),
+                ),
+                Positioned(
+                  bottom: 8,
+                  left: 8,
+                  right: 8,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (isMuted) ...[
+                          const Icon(Icons.mic_off, size: 14, color: Colors.redAccent),
+                          const SizedBox(width: 4),
+                        ],
+                        Expanded(
+                          child: Text(
+                            p.username,
+                            style: const TextStyle(color: Colors.white, fontSize: 12),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+          },
+          );
+        },
       ),
     );
   }
