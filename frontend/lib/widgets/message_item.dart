@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
+
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart' as media_kit;
 import 'package:media_kit_video/media_kit_video.dart';
@@ -363,6 +365,24 @@ class _MessageItemState extends State<MessageItem> {
     );
   }
 
+  void _showReactionPicker(BuildContext context, AppState state) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF2F3136),
+      builder: (BuildContext context) {
+        return SizedBox(
+          height: 250,
+          child: EmojiPicker(
+            onEmojiSelected: (category, emoji) {
+              state.addReaction(widget.message.id, emoji.emoji);
+              Navigator.pop(context);
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isHighlighted = context.select<AppState, bool>(
@@ -524,6 +544,52 @@ class _MessageItemState extends State<MessageItem> {
                             else
                               _buildFileAttachment(context, attachmentUrl),
                           ],
+                          if (widget.message.reactions.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Wrap(
+                                spacing: 4,
+                                runSpacing: 4,
+                                children: widget.message.reactions
+                                    .fold<Map<String, List<Reaction>>>(
+                                        {},
+                                        (map, r) {
+                                          map.putIfAbsent(r.emoji, () => []).add(r);
+                                          return map;
+                                        })
+                                    .entries
+                                    .map((entry) {
+                                  final emoji = entry.key;
+                                  final reactList = entry.value;
+                                  final hasReacted = reactList.any((r) => r.userId == currentUserId);
+                                  return InkWell(
+                                    onTap: () {
+                                      if (hasReacted) {
+                                        context.read<AppState>().removeReaction(widget.message.id, emoji);
+                                      } else {
+                                        context.read<AppState>().addReaction(widget.message.id, emoji);
+                                      }
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: hasReacted ? Colors.blue.withOpacity(0.3) : const Color(0xFF202225),
+                                        borderRadius: BorderRadius.circular(4),
+                                        border: Border.all(color: hasReacted ? Colors.blue : const Color(0xFF202225)),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(emoji, style: const TextStyle(fontSize: 14)),
+                                          const SizedBox(width: 4),
+                                          Text('${reactList.length}', style: TextStyle(color: hasReacted ? Colors.blueAccent : Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -546,6 +612,14 @@ class _MessageItemState extends State<MessageItem> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      IconButton(
+                        icon: const Icon(Icons.add_reaction_outlined,
+                            size: 18, color: Colors.grey),
+                        onPressed: () => _showReactionPicker(
+                            context, context.read<AppState>()),
+                        tooltip: "Add Reaction",
+                        constraints: const BoxConstraints(),
+                      ),
                       IconButton(
                         icon: const Icon(Icons.reply,
                             size: 18, color: Colors.grey),

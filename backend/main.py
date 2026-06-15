@@ -1709,6 +1709,16 @@ def _serialize_message_payload(message: models.Message, payload_type: str) -> Di
         "mentioned_user_ids": message.mentioned_user_ids,
         "mentioned_usernames": message.mentioned_usernames,
         "author_profile_picture_url": message.author_profile_picture_url,
+        "reactions": [
+            {
+                "id": r.id,
+                "message_id": r.message_id,
+                "user_id": r.user_id,
+                "emoji": r.emoji,
+                "username": r.user.username if r.user else "Unknown"
+            }
+            for r in message.reactions
+        ] if getattr(message, 'reactions', None) else [],
     }
 
 
@@ -3623,6 +3633,44 @@ async def websocket_endpoint(
                             "edited_at": str(db_message.edited_at),
                         }
                     )
+                elif msg_type == "add_reaction":
+                    msg_id = data_json.get("id")
+                    emoji = data_json.get("emoji")
+                    db_message = db.query(models.Message).filter(models.Message.id == msg_id).first()
+                    if db_message:
+                        existing = db.query(models.Reaction).filter_by(message_id=msg_id, user_id=user_id, emoji=emoji).first()
+                        if not existing:
+                            reaction = models.Reaction(message_id=msg_id, user_id=user_id, emoji=emoji)
+                            db.add(reaction)
+                            db.commit()
+                            broadcast_msg = json.dumps({
+                                "type": "reaction_added",
+                                "message_id": msg_id,
+                                "reaction": {
+                                    "id": reaction.id,
+                                    "message_id": msg_id,
+                                    "user_id": user_id,
+                                    "emoji": emoji,
+                                    "username": username
+                                }
+                            })
+                            await manager.broadcast(channel_id, broadcast_msg)
+                    continue
+                elif msg_type == "remove_reaction":
+                    msg_id = data_json.get("id")
+                    emoji = data_json.get("emoji")
+                    existing = db.query(models.Reaction).filter_by(message_id=msg_id, user_id=user_id, emoji=emoji).first()
+                    if existing:
+                        db.delete(existing)
+                        db.commit()
+                        broadcast_msg = json.dumps({
+                            "type": "reaction_removed",
+                            "message_id": msg_id,
+                            "user_id": user_id,
+                            "emoji": emoji
+                        })
+                        await manager.broadcast(channel_id, broadcast_msg)
+                    continue
                 elif msg_type == "delete_message":
                     msg_id = data_json.get("id")
                     db_message = (

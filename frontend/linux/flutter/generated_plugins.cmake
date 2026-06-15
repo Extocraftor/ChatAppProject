@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  emoji_picker_flutter
   flutter_webrtc
   media_kit_libs_linux
   media_kit_video

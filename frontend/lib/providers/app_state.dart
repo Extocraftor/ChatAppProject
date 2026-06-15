@@ -207,6 +207,9 @@ class AppState extends ChangeNotifier {
   bool _playVoiceNotificationSounds = true;
   bool get playVoiceNotificationSounds => _playVoiceNotificationSounds;
 
+  String _themeMode = 'dark';
+  String get themeMode => _themeMode;
+
   AppState() {
     _loadSettings();
     unawaited(_applyMusicPlaybackVolume(_defaultMusicBotVolume));
@@ -223,6 +226,7 @@ class AppState extends ChangeNotifier {
     _playNotificationSounds = prefs.getBool('play_notification_sounds') ?? true;
     _playVoiceNotificationSounds =
         prefs.getBool('play_voice_notification_sounds') ?? true;
+    _themeMode = prefs.getString('theme_mode') ?? 'dark';
     notifyListeners();
   }
 
@@ -238,6 +242,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('play_voice_notification_sounds', value);
+  }
+
+  Future<void> setThemeMode(String value) async {
+    _themeMode = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('theme_mode', value);
   }
 
   void _playNotificationSound(int channelId) {
@@ -2338,6 +2349,30 @@ class AppState extends ChangeNotifier {
             mentionedUserIds: mentionedUserIds,
             mentionedUsernames: mentionedUsernames,
           );
+        }
+      } else if (type == 'reaction_added') {
+        final msgId = payload['message_id'];
+        final rData = payload['reaction'];
+        if (msgId != null && rData != null) {
+          final reaction = Reaction.fromJson(rData);
+          final index = messages.indexWhere((m) => m.id == msgId);
+          if (index != -1) {
+            final oldMsg = messages[index];
+            final newReactions = List<Reaction>.from(oldMsg.reactions)..add(reaction);
+            messages[index] = oldMsg.copyWith(reactions: newReactions);
+          }
+        }
+      } else if (type == 'reaction_removed') {
+        final msgId = payload['message_id'];
+        final rUserId = payload['user_id'];
+        final rEmoji = payload['emoji'];
+        if (msgId != null && rUserId != null && rEmoji != null) {
+          final index = messages.indexWhere((m) => m.id == msgId);
+          if (index != -1) {
+            final oldMsg = messages[index];
+            final newReactions = oldMsg.reactions.where((r) => !(r.userId == rUserId && r.emoji == rEmoji)).toList();
+            messages[index] = oldMsg.copyWith(reactions: newReactions);
+          }
         }
       } else if (type == 'delete_message') {
         final id = payload['id'];
@@ -4796,15 +4831,28 @@ class AppState extends ChangeNotifier {
 
   void deleteMessage(int messageId) {
     if (_channel != null) {
-      final messageData = {
-        "type": "delete_message",
+      _channel!.sink
+          .add(jsonEncode({"type": "delete_message", "id": messageId}));
+    }
+  }
+
+  void addReaction(int messageId, String emoji) {
+    if (_channel != null) {
+      _channel!.sink.add(jsonEncode({
+        "type": "add_reaction",
         "id": messageId,
-      };
-      try {
-        _channel!.sink.add(jsonEncode(messageData));
-      } catch (_) {
-        _scheduleTextReconnect();
-      }
+        "emoji": emoji,
+      }));
+    }
+  }
+
+  void removeReaction(int messageId, String emoji) {
+    if (_channel != null) {
+      _channel!.sink.add(jsonEncode({
+        "type": "remove_reaction",
+        "id": messageId,
+        "emoji": emoji,
+      }));
     }
   }
 

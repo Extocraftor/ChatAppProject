@@ -21,6 +21,7 @@ dependencies:
   scrollable_positioned_list: ^0.3.8
   media_kit_libs_video: ^1.0.7
   shared_preferences: ^2.5.5
+  emoji_picker_flutter: ^4.4.0
 
 dev_dependencies:
   flutter_test:

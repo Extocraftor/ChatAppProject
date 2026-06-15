@@ -126,6 +126,23 @@ class VoiceChannelPermission(Base):
     channel = relationship("VoiceChannel", back_populates="permissions")
 
 
+class Reaction(Base):
+    __tablename__ = "reactions"
+    __table_args__ = (UniqueConstraint("message_id", "user_id", "emoji", name="uq_reactions_message_user_emoji"),)
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    emoji = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    message = relationship("Message", back_populates="reactions")
+    user = relationship("User")
+
+    @property
+    def username(self):
+        return self.user.username if self.user else "Unknown"
+
+
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, index=True)
@@ -153,6 +170,7 @@ class Message(Base):
     channel = relationship("Channel", back_populates="messages")
     parent = relationship("Message", remote_side=[id], backref="replies")
     pinned_by = relationship("User", foreign_keys=[pinned_by_user_id])
+    reactions = relationship("Reaction", back_populates="message", cascade="all, delete-orphan")
 
     @property
     def username(self):

@@ -18,6 +18,16 @@ class MessageCreate(MessageBase):
     channel_id: int
     parent_id: Optional[int] = None
 
+class ReactionSchema(BaseModel):
+    id: int
+    message_id: int
+    user_id: int
+    emoji: str
+    username: str
+
+    class Config:
+        from_attributes = True
+
 class MessageSchema(MessageBase):
     id: int
     timestamp: datetime
@@ -39,6 +49,7 @@ class MessageSchema(MessageBase):
     mentioned_user_ids: List[int] = Field(default_factory=list)
     mentioned_usernames: List[str] = Field(default_factory=list)
     author_profile_picture_url: Optional[str] = None
+    reactions: List[ReactionSchema] = []
 
     class Config:
         from_attributes = True

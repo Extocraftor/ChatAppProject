@@ -87,28 +87,25 @@ class VoiceParticipant {
   VoiceParticipant({
     required this.userId,
     required this.username,
-    required this.isMuted,
     this.profilePictureUrl,
+    this.isMuted = false,
     this.isScreenSharing = false,
     this.isBot = false,
     this.isSpeaking = false,
   });
 
   VoiceParticipant copyWith({
-    String? username,
-    String? profilePictureUrl,
     bool? isMuted,
     bool? isScreenSharing,
-    bool? isBot,
     bool? isSpeaking,
   }) {
     return VoiceParticipant(
       userId: userId,
-      username: username ?? this.username,
-      profilePictureUrl: profilePictureUrl ?? this.profilePictureUrl,
+      username: username,
+      profilePictureUrl: profilePictureUrl,
       isMuted: isMuted ?? this.isMuted,
       isScreenSharing: isScreenSharing ?? this.isScreenSharing,
-      isBot: isBot ?? this.isBot,
+      isBot: isBot,
       isSpeaking: isSpeaking ?? this.isSpeaking,
     );
   }
@@ -121,7 +118,44 @@ class VoiceParticipant {
       isMuted: json['is_muted'] ?? false,
       isScreenSharing: json['is_screen_sharing'] == true,
       isBot: json['is_bot'] == true,
+      isSpeaking: json['is_speaking'] == true,
     );
+  }
+}
+
+class Reaction {
+  final int id;
+  final int messageId;
+  final int userId;
+  final String emoji;
+  final String username;
+
+  Reaction({
+    required this.id,
+    required this.messageId,
+    required this.userId,
+    required this.emoji,
+    required this.username,
+  });
+
+  factory Reaction.fromJson(Map<String, dynamic> json) {
+    return Reaction(
+      id: json['id'],
+      messageId: json['message_id'],
+      userId: json['user_id'],
+      emoji: json['emoji'],
+      username: json['username'] ?? "Unknown",
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'message_id': messageId,
+      'user_id': userId,
+      'emoji': emoji,
+      'username': username,
+    };
   }
 }
 
@@ -147,6 +181,7 @@ class Message {
   final List<int> mentionedUserIds;
   final List<String> mentionedUsernames;
   final String? authorProfilePictureUrl;
+  final List<Reaction> reactions;
 
   Message({
     required this.id,
@@ -168,10 +203,12 @@ class Message {
     List<int>? mentionedUserIds,
     List<String>? mentionedUsernames,
     this.authorProfilePictureUrl,
+    List<Reaction>? reactions,
   })  : mentionedUserIds =
             List<int>.unmodifiable(mentionedUserIds ?? const <int>[]),
         mentionedUsernames =
-            List<String>.unmodifiable(mentionedUsernames ?? const <String>[]);
+            List<String>.unmodifiable(mentionedUsernames ?? const <String>[]),
+        reactions = List<Reaction>.unmodifiable(reactions ?? const <Reaction>[]);
 
   Message copyWith({
     String? content,
@@ -186,6 +223,7 @@ class Message {
     List<int>? mentionedUserIds,
     List<String>? mentionedUsernames,
     Object? authorProfilePictureUrl = _unset,
+    List<Reaction>? reactions,
   }) {
     return Message(
       id: id,
@@ -221,6 +259,7 @@ class Message {
       authorProfilePictureUrl: identical(authorProfilePictureUrl, _unset)
           ? this.authorProfilePictureUrl
           : authorProfilePictureUrl as String?,
+      reactions: reactions ?? this.reactions,
     );
   }
 
@@ -265,6 +304,9 @@ class Message {
       mentionedUserIds: mentionedUserIds,
       mentionedUsernames: mentionedUsernames,
       authorProfilePictureUrl: json['author_profile_picture_url'],
+      reactions: (json['reactions'] as List<dynamic>? ?? [])
+          .map((r) => Reaction.fromJson(Map<String, dynamic>.from(r)))
+          .toList(),
     );
   }
 }

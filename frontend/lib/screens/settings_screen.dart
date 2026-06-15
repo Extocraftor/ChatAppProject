@@ -107,6 +107,23 @@ class SettingsScreen extends StatelessWidget {
                           },
                         ),
                       ),
+                      ListTile(
+                        leading: const Icon(Icons.palette),
+                        title: const Text("Theme"),
+                        subtitle: const Text("Select app appearance"),
+                        trailing: DropdownButton<String>(
+                          value: state.themeMode,
+                          items: const [
+                            DropdownMenuItem(value: 'dark', child: Text('Dark')),
+                            DropdownMenuItem(value: 'light', child: Text('Light')),
+                            DropdownMenuItem(value: 'midnight', child: Text('Midnight')),
+                            DropdownMenuItem(value: 'ocean', child: Text('Ocean')),
+                          ],
+                          onChanged: (value) {
+                            if (value != null) state.setThemeMode(value);
+                          },
+                        ),
+                      ),
                     ],
                   );
                 },
