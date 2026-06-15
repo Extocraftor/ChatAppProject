@@ -17,16 +17,16 @@ import '../models/chat_models.dart';
 import '../utils/ws_channel_factory.dart';
 
 class AppState extends ChangeNotifier {
-  static const String baseUrl = "http://127.0.0.1:8000";
-  static const String wsUrl = "ws://127.0.0.1:8000/ws";
+  static const String baseUrl = "http://89.168.74.214:8000";
+  static const String wsUrl = "ws://89.168.74.214:8000/ws";
   // static const String baseUrl = "https://extochatapp.onrender.com";
   // static const String wsUrl = "wss://extochatapp.onrender.com/ws";
   static const int _musicBotUserId = -1;
   static const double _defaultVoiceParticipantVolume = 1.0;
   static const double _defaultMusicBotVolume = 0.2;
 
-
-  Future<Map<String, String>> _authHeaders([Map<String, String>? additional]) async {
+  Future<Map<String, String>> _authHeaders(
+      [Map<String, String>? additional]) async {
     final headers = <String, String>{};
     if (accessToken != null) {
       headers['Authorization'] = 'Bearer $accessToken';
@@ -36,7 +36,7 @@ class AppState extends ChangeNotifier {
     }
     return headers;
   }
-  
+
   Future<void> tryAutoLogin() async {
     final prefs = await SharedPreferences.getInstance();
     accessToken = prefs.getString('access_token');
@@ -77,8 +77,6 @@ class AppState extends ChangeNotifier {
     ],
   };
 
-
-  
   String? accessToken;
   String? refreshToken;
 
@@ -223,7 +221,8 @@ class AppState extends ChangeNotifier {
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     _playNotificationSounds = prefs.getBool('play_notification_sounds') ?? true;
-    _playVoiceNotificationSounds = prefs.getBool('play_voice_notification_sounds') ?? true;
+    _playVoiceNotificationSounds =
+        prefs.getBool('play_voice_notification_sounds') ?? true;
     notifyListeners();
   }
 
@@ -292,7 +291,8 @@ class AppState extends ChangeNotifier {
     final userId = currentUser?.id;
     if (userId == null) return;
     try {
-      final response = await http.get(Uri.parse("$baseUrl/users/me"), headers: await _authHeaders());
+      final response = await http.get(Uri.parse("$baseUrl/users/me"),
+          headers: await _authHeaders());
       if (response.statusCode == 200) {
         currentUser = User.fromJson(jsonDecode(response.body));
         notifyListeners();
@@ -352,7 +352,8 @@ class AppState extends ChangeNotifier {
       final uri = Uri.parse("$baseUrl/users/me/profile-picture");
       final request = http.MultipartRequest("POST", uri);
       request.headers.addAll(await _authHeaders());
-      request.files.add(http.MultipartFile.fromBytes("file", bytes, filename: filename));
+      request.files
+          .add(http.MultipartFile.fromBytes("file", bytes, filename: filename));
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
       if (response.statusCode == 200) {
@@ -379,7 +380,8 @@ class AppState extends ChangeNotifier {
 
   // Scrolling
   final ItemScrollController itemScrollController = ItemScrollController();
-  final ItemPositionsListener itemPositionsListener = ItemPositionsListener.create();
+  final ItemPositionsListener itemPositionsListener =
+      ItemPositionsListener.create();
 
   bool get isVoiceConnecting => _voiceConnecting;
   bool get isVoiceSignalConnected =>
@@ -449,6 +451,7 @@ class AppState extends ChangeNotifier {
     final role = currentUser?.role.toLowerCase();
     return role == "admin" || role == "moderator";
   }
+
   bool get canCreateChannels => canModerateChannels;
   bool hasChannelActivity(int channelId) =>
       _channelsWithUnreadMessages.contains(channelId);
@@ -588,8 +591,10 @@ class AppState extends ChangeNotifier {
         accessToken = responseData['access_token'];
         refreshToken = responseData['refresh_token'];
         final prefs = await SharedPreferences.getInstance();
-        if (accessToken != null) await prefs.setString('access_token', accessToken!);
-        if (refreshToken != null) await prefs.setString('refresh_token', refreshToken!);
+        if (accessToken != null)
+          await prefs.setString('access_token', accessToken!);
+        if (refreshToken != null)
+          await prefs.setString('refresh_token', refreshToken!);
         currentUser = User.fromJson(responseData['user']);
         _channelsWithUnreadMessages.clear();
         _channelsWithMentions.clear();
@@ -628,12 +633,14 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      final response = await http.get(Uri.parse("$baseUrl/users/"), headers: await _authHeaders());
+      final response = await http.get(Uri.parse("$baseUrl/users/"),
+          headers: await _authHeaders());
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
         mentionableUsers = data.map((item) => User.fromJson(item)).toList();
         mentionableUsers.sort(
-          (a, b) => a.username.toLowerCase().compareTo(b.username.toLowerCase()),
+          (a, b) =>
+              a.username.toLowerCase().compareTo(b.username.toLowerCase()),
         );
       }
     } catch (_) {
@@ -671,7 +678,8 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.get(
         Uri.parse("$baseUrl/admin/users/"),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         adminPermissionsError = "Unable to load users (${response.statusCode})";
         return;
@@ -690,8 +698,8 @@ class AppState extends ChangeNotifier {
       }
 
       if (autoSelectFirst) {
-        final nextUserId =
-            selectedAdminUser?.id ?? (adminUsers.isNotEmpty ? adminUsers.first.id : null);
+        final nextUserId = selectedAdminUser?.id ??
+            (adminUsers.isNotEmpty ? adminUsers.first.id : null);
         if (nextUserId != null) {
           await fetchAdminPermissionsForUser(nextUserId);
         } else {
@@ -721,7 +729,8 @@ class AppState extends ChangeNotifier {
         Uri.parse(
           "$baseUrl/admin/users/$targetUserId/permissions",
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         adminPermissionsError =
             "Unable to load permissions (${response.statusCode})";
@@ -729,8 +738,7 @@ class AppState extends ChangeNotifier {
       }
 
       final payload = jsonDecode(response.body);
-      selectedUserChannelPermissions =
-          UserChannelPermissions.fromJson(payload);
+      selectedUserChannelPermissions = UserChannelPermissions.fromJson(payload);
 
       final matched = adminUsers.where((user) => user.id == targetUserId);
       if (matched.isNotEmpty) {
@@ -895,7 +903,8 @@ class AppState extends ChangeNotifier {
         Uri.parse(
           "$baseUrl/admin/channels/$channelId/permissions",
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return null;
       }
@@ -918,7 +927,8 @@ class AppState extends ChangeNotifier {
         Uri.parse(
           "$baseUrl/admin/voice-channels/$channelId/permissions",
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return null;
       }
@@ -1062,7 +1072,8 @@ class AppState extends ChangeNotifier {
 
     final response = await http.get(
       Uri.parse("$baseUrl/channels/"),
-     headers: await _authHeaders(),);
+      headers: await _authHeaders(),
+    );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       channels = data.map((c) => Channel.fromJson(c)).toList();
@@ -1096,7 +1107,8 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.delete(
         Uri.parse("$baseUrl/channels/$channelId"),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return false;
       }
@@ -1125,7 +1137,8 @@ class AppState extends ChangeNotifier {
 
     final response = await http.get(
       Uri.parse("$baseUrl/voice-channels/"),
-     headers: await _authHeaders(),);
+      headers: await _authHeaders(),
+    );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       voiceChannels = data.map((c) => VoiceChannel.fromJson(c)).toList();
@@ -1533,7 +1546,8 @@ class AppState extends ChangeNotifier {
             "limit": "${limit.clamp(1, 100)}",
           },
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
         messageSearchResults = data.map((m) => Message.fromJson(m)).toList();
@@ -1573,7 +1587,8 @@ class AppState extends ChangeNotifier {
             "actor_user_id": "$userId",
           },
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
         pinnedMessages = data.map((m) => Message.fromJson(m)).toList();
@@ -1605,7 +1620,8 @@ class AppState extends ChangeNotifier {
             "actor_user_id": "$userId",
           },
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return false;
       }
@@ -1633,7 +1649,8 @@ class AppState extends ChangeNotifier {
             "actor_user_id": "$userId",
           },
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return false;
       }
@@ -1705,8 +1722,8 @@ class AppState extends ChangeNotifier {
       if (responseBody.isNotEmpty) {
         try {
           final uploadedMessage = Message.fromJson(jsonDecode(responseBody));
-          final existingIndex =
-              messages.indexWhere((message) => message.id == uploadedMessage.id);
+          final existingIndex = messages
+              .indexWhere((message) => message.id == uploadedMessage.id);
           if (existingIndex == -1) {
             messages.add(uploadedMessage);
             if (uploadedMessage.isPinned) {
@@ -1750,7 +1767,8 @@ class AppState extends ChangeNotifier {
       Uri.parse(
         "$baseUrl/channels/$channelId/messages/",
       ),
-     headers: await _authHeaders(),);
+      headers: await _authHeaders(),
+    );
     if (response.statusCode == 200) {
       final List data = jsonDecode(response.body);
       final fetchedMessages = data.map((m) => Message.fromJson(m)).toList();
@@ -1779,7 +1797,8 @@ class AppState extends ChangeNotifier {
         Uri.parse(
           "$baseUrl/notifications/channel-unread",
         ),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return;
       }
@@ -2157,7 +2176,7 @@ class AppState extends ChangeNotifier {
             changed = true;
           }
         }
-        
+
         // Update voice participants if they are in the sidebar
         for (final channel in voiceChannels) {
           for (final participant in channel.participants) {
@@ -2183,9 +2202,10 @@ class AppState extends ChangeNotifier {
         final index = voiceChannels.indexWhere((c) => c.id == voiceChannelId);
         if (index != -1) {
           final participants = participantsJson
-              .map((p) => VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
+              .map((p) =>
+                  VoiceParticipant.fromJson(Map<String, dynamic>.from(p)))
               .toList();
-          
+
           final newList = List<VoiceChannel>.from(voiceChannels);
           newList[index] = VoiceChannel(
             id: newList[index].id,
@@ -2313,8 +2333,7 @@ class AppState extends ChangeNotifier {
         }
         final pinnedIndex = pinnedMessages.indexWhere((m) => m.id == id);
         if (pinnedIndex != -1) {
-          pinnedMessages[pinnedIndex] =
-              pinnedMessages[pinnedIndex].copyWith(
+          pinnedMessages[pinnedIndex] = pinnedMessages[pinnedIndex].copyWith(
             content: content,
             mentionedUserIds: mentionedUserIds,
             mentionedUsernames: mentionedUsernames,
@@ -2332,8 +2351,9 @@ class AppState extends ChangeNotifier {
             messageId: id,
             isPinned: true,
             pinnedAt: payload['pinned_at']?.toString(),
-            pinnedByUserId:
-                payload['pinned_by_user_id'] is int ? payload['pinned_by_user_id'] : null,
+            pinnedByUserId: payload['pinned_by_user_id'] is int
+                ? payload['pinned_by_user_id']
+                : null,
             pinnedByUsername: payload['pinned_by_username']?.toString(),
           );
         }
@@ -2489,7 +2509,8 @@ class AppState extends ChangeNotifier {
     unawaited(_recoverVoiceFromDisconnect(reconnectChannel));
   }
 
-  Future<void> _recoverVoiceFromDisconnect(VoiceChannel reconnectChannel) async {
+  Future<void> _recoverVoiceFromDisconnect(
+      VoiceChannel reconnectChannel) async {
     await leaveVoiceChannel(
       notify: true,
       clearError: false,
@@ -2657,7 +2678,8 @@ class AppState extends ChangeNotifier {
         if (userId is int) {
           final current = voiceParticipants[userId];
           if (current != null) {
-            voiceParticipants[userId] = current.copyWith(isSpeaking: isSpeaking);
+            voiceParticipants[userId] =
+                current.copyWith(isSpeaking: isSpeaking);
           }
           notifyListeners();
         }
@@ -3342,7 +3364,8 @@ class AppState extends ChangeNotifier {
     }
 
     if (renegotiate) {
-      for (final remoteUserId in senderEntries.map((entry) => entry.key).toSet()) {
+      for (final remoteUserId
+          in senderEntries.map((entry) => entry.key).toSet()) {
         if (!_peerConnections.containsKey(remoteUserId)) {
           continue;
         }
@@ -3382,7 +3405,8 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    final sender = await peerConnection.addTrack(videoTracks.first, screenStream);
+    final sender =
+        await peerConnection.addTrack(videoTracks.first, screenStream);
     _screenShareSenders[remoteUserId] = sender;
   }
 
@@ -3398,8 +3422,7 @@ class AppState extends ChangeNotifier {
     }
 
     final participant = voiceParticipants[userId];
-    if (participant != null &&
-        participant.isScreenSharing != isScreenSharing) {
+    if (participant != null && participant.isScreenSharing != isScreenSharing) {
       voiceParticipants[userId] = participant.copyWith(
         isScreenSharing: isScreenSharing,
       );
@@ -3537,8 +3560,8 @@ class AppState extends ChangeNotifier {
 
     final selfParticipant = voiceParticipants[currentUser!.id];
     if (selfParticipant != null) {
-      voiceParticipants[currentUser!.id] =
-          selfParticipant.copyWith(isMuted: isSelfMuted, isSpeaking: isSelfMuted ? false : null);
+      voiceParticipants[currentUser!.id] = selfParticipant.copyWith(
+          isMuted: isSelfMuted, isSpeaking: isSelfMuted ? false : null);
     }
 
     // Clear speaking state immediately when muting.
@@ -3569,7 +3592,7 @@ class AppState extends ChangeNotifier {
       _voiceReconnectAttempt = 0;
       _voiceReconnectTimer?.cancel();
       _voiceReconnectTimer = null;
-      
+
       // If we were connected or connecting, play the leave sound
       if (_voiceConnecting || activeVoiceChannel != null) {
         _playVoiceLeaveSound();
@@ -3819,7 +3842,8 @@ class AppState extends ChangeNotifier {
     try {
       final response = await http.delete(
         Uri.parse("$baseUrl/voice-channels/$channelId"),
-       headers: await _authHeaders(),);
+        headers: await _authHeaders(),
+      );
       if (response.statusCode != 200) {
         return false;
       }
@@ -4653,7 +4677,8 @@ class AppState extends ChangeNotifier {
     required int? pinnedByUserId,
     required String? pinnedByUsername,
   }) {
-    final messageIndex = messages.indexWhere((message) => message.id == messageId);
+    final messageIndex =
+        messages.indexWhere((message) => message.id == messageId);
     if (messageIndex != -1) {
       final existing = messages[messageIndex];
       messages[messageIndex] = existing.copyWith(
@@ -4664,8 +4689,8 @@ class AppState extends ChangeNotifier {
       );
     }
 
-    final searchIndex = messageSearchResults
-        .indexWhere((message) => message.id == messageId);
+    final searchIndex =
+        messageSearchResults.indexWhere((message) => message.id == messageId);
     if (searchIndex != -1) {
       final existing = messageSearchResults[searchIndex];
       messageSearchResults[searchIndex] = existing.copyWith(
@@ -4872,7 +4897,6 @@ class AppState extends ChangeNotifier {
     _highlightTimer?.cancel();
     super.dispose();
   }
-
 }
 
 class _MicDiagnosticsSample {
