@@ -2360,6 +2360,7 @@ class AppState extends ChangeNotifier {
             final oldMsg = messages[index];
             final newReactions = List<Reaction>.from(oldMsg.reactions)..add(reaction);
             messages[index] = oldMsg.copyWith(reactions: newReactions);
+            notifyListeners();
           }
         }
       } else if (type == 'reaction_removed') {
@@ -2372,6 +2373,7 @@ class AppState extends ChangeNotifier {
             final oldMsg = messages[index];
             final newReactions = oldMsg.reactions.where((r) => !(r.userId == rUserId && r.emoji == rEmoji)).toList();
             messages[index] = oldMsg.copyWith(reactions: newReactions);
+            notifyListeners();
           }
         }
       } else if (type == 'delete_message') {

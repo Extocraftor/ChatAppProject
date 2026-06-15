@@ -613,10 +613,10 @@ class _MessageInputState extends State<MessageInput> {
                     height: pickerHeight,
                     child: Container(
                       decoration: BoxDecoration(
-                        color: const Color(0xFF2F3136),
+                        color: Theme.of(context).colorScheme.surface,
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(
-                          color: const Color(0xFF202225),
+                          color: Theme.of(context).colorScheme.surfaceVariant,
                           width: 1,
                         ),
                         boxShadow: const [
@@ -635,12 +635,12 @@ class _MessageInputState extends State<MessageInput> {
                               controller: _emojiSearchController,
                               focusNode: _emojiSearchFocusNode,
                               textInputAction: TextInputAction.search,
-                              style: const TextStyle(fontSize: 14),
+                              style: TextStyle(fontSize: 14),
                               decoration: InputDecoration(
                                 hintText: 'Search emojis',
                                 isDense: true,
                                 filled: true,
-                                fillColor: const Color(0xFF202225),
+                                fillColor: Theme.of(context).colorScheme.surfaceVariant,
                                 prefixIcon: const Icon(Icons.search, size: 18),
                                 suffixIcon: _emojiSearchController.text.isNotEmpty
                                     ? IconButton(
@@ -655,10 +655,10 @@ class _MessageInputState extends State<MessageInput> {
                               ),
                             ),
                           ),
-                          const Divider(
+                          Divider(
                             height: 1,
                             thickness: 1,
-                            color: Color(0xFF202225),
+                            color: Theme.of(context).colorScheme.surfaceVariant,
                           ),
                           Expanded(
                             child: filteredEmojis.isEmpty
@@ -692,7 +692,7 @@ class _MessageInputState extends State<MessageInput> {
                                           child: Center(
                                             child: Text(
                                               emoji,
-                                              style: const TextStyle(fontSize: 24),
+                                              style: TextStyle(fontSize: 24),
                                             ),
                                           ),
                                         ),
@@ -785,14 +785,14 @@ class _MessageInputState extends State<MessageInput> {
               constraints: const BoxConstraints(maxHeight: 180),
               margin: const EdgeInsets.only(bottom: 6),
               decoration: BoxDecoration(
-                color: const Color(0xFF2F3136),
+                color: Theme.of(context).colorScheme.surface,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFF202225)),
+                border: Border.all(color: Theme.of(context).colorScheme.surfaceVariant),
               ),
               child: ListView.separated(
                 shrinkWrap: true,
                 itemCount: mentionSuggestions.length,
-                separatorBuilder: (_, __) => const Divider(height: 1),
+                separatorBuilder: (_, __) => Divider(height: 1),
                 itemBuilder: (context, index) {
                   final user = mentionSuggestions[index];
                   return ListTile(
@@ -812,8 +812,8 @@ class _MessageInputState extends State<MessageInput> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               margin: const EdgeInsets.only(bottom: 0),
-              decoration: const BoxDecoration(
-                color: Color(0xFF2F3136),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
               ),
               child: Row(
@@ -829,7 +829,7 @@ class _MessageInputState extends State<MessageInput> {
                       replyingTo != null
                           ? 'Replying to ${replyingTo.username}'
                           : 'Editing message',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
                         color: Colors.grey,
@@ -854,8 +854,8 @@ class _MessageInputState extends State<MessageInput> {
             Container(
               margin: const EdgeInsets.only(bottom: 0),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: const BoxDecoration(
-                color: Color(0xFF2F3136),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
               ),
               child: ConstrainedBox(
@@ -878,7 +878,7 @@ class _MessageInputState extends State<MessageInput> {
                           child: Text(
                             attachment.name,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
                             ),
@@ -888,7 +888,7 @@ class _MessageInputState extends State<MessageInput> {
                           const SizedBox(width: 8),
                           Text(
                             _formatByteCount(attachment.bytes!.length),
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 11,
                               color: Colors.grey,
                             ),
@@ -936,7 +936,7 @@ class _MessageInputState extends State<MessageInput> {
                     ? 'Edit message'
                     : 'Message #${activeChannel?.name ?? ''}',
                 filled: true,
-                fillColor: const Color(0xFF40444B),
+                fillColor: Theme.of(context).colorScheme.surfaceVariant,
                 border: OutlineInputBorder(
                   borderRadius:
                       _inputBorderRadius(hasContextBanner: hasContextBanner),

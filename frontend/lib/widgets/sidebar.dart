@@ -42,15 +42,15 @@ class Sidebar extends StatelessWidget {
 
     return Container(
       width: 270,
-      color: const Color(0xFF2F3136),
+      color: Theme.of(context).colorScheme.surface,
       child: Column(
         children: [
           Container(
             height: 50,
             alignment: Alignment.centerLeft,
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: const BoxDecoration(
-              border: Border(bottom: BorderSide(color: Color(0xFF202225))),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.surfaceVariant)),
             ),
             child: Row(
               children: [
@@ -98,7 +98,7 @@ class Sidebar extends StatelessWidget {
                     ),
                   ),
                 if (isAdmin)
-                  const Divider(height: 1, color: Color(0xFF202225)),
+                  Divider(height: 1, color: Theme.of(context).colorScheme.surfaceVariant),
                 _SectionHeader(
                   title: "TEXT CHANNELS",
                   icon: Icons.tag,
@@ -128,11 +128,11 @@ class Sidebar extends StatelessWidget {
           if (activeVoiceChannelId != null) const _VoiceStatusPanel(),
           Container(
             padding: const EdgeInsets.all(8),
-            color: const Color(0xFF292B2F),
+            color: Theme.of(context).colorScheme.surface,
             child: Row(
               children: [
                 CircleAvatar(
-                  backgroundColor: const Color(0xFF5865F2),
+                  backgroundColor: Theme.of(context).primaryColor,
                   backgroundImage: context.select<AppState, String?>(
                               (s) => s.currentUser?.profilePictureUrl) !=
                           null
@@ -149,7 +149,7 @@ class Sidebar extends StatelessWidget {
                 Expanded(
                   child: Text(
                     currentUsername,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+                    style: TextStyle(fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -181,7 +181,7 @@ class Sidebar extends StatelessWidget {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: const Color(0xFF2F3136),
+          backgroundColor: Theme.of(context).colorScheme.surface,
           title: Text(isVoice ? "Create Voice Channel" : "Create Text Channel"),
           content: Column(
             mainAxisSize: MainAxisSize.min,
@@ -273,7 +273,7 @@ class _SectionHeader extends StatelessWidget {
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(
+              style: TextStyle(
                 fontWeight: FontWeight.bold,
                 color: Colors.grey,
                 fontSize: 12,
@@ -410,7 +410,7 @@ class _TextChannelTile extends StatelessWidget {
         ),
         onTap: () => context.read<AppState>().selectChannel(channel),
         selected: isActive,
-        selectedTileColor: const Color(0xFF40444B),
+        selectedTileColor: Theme.of(context).colorScheme.surfaceVariant,
         trailing: trailingActions.isEmpty
             ? null
             : Row(
@@ -444,7 +444,7 @@ class _TextChannelTile extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2F3136),
+        backgroundColor: Theme.of(context).colorScheme.surface,
         title: const Text("Delete Text Channel"),
         content: Text(
           "Delete #${channel.name}? This will permanently remove all messages in this channel.",
@@ -639,7 +639,7 @@ class _VoiceChannelTile extends StatelessWidget {
                 : null,
             trailing: trailing,
             selected: isActive,
-            selectedTileColor: const Color(0xFF40444B),
+            selectedTileColor: Theme.of(context).colorScheme.surfaceVariant,
             onTap: isConnecting ? null : () => _handleVoiceChannelTap(context, channel, isActive),
           ),
         ),
@@ -691,7 +691,7 @@ class _VoiceChannelTile extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2F3136),
+        backgroundColor: Theme.of(context).colorScheme.surface,
         title: const Text("Delete Voice Channel"),
         content: Text(
           "Delete ${channel.name}? This disconnects everyone currently in the channel.",
@@ -748,7 +748,7 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
     return Container(
       margin: const EdgeInsets.fromLTRB(40, 0, 12, 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF36393F),
+        color: Theme.of(context).scaffoldBackgroundColor,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(
@@ -791,7 +791,7 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
                       ),
                       child: CircleAvatar(
                         radius: 10,
-                        backgroundColor: const Color(0xFF5865F2),
+                        backgroundColor: Theme.of(context).primaryColor,
                         backgroundImage: widget.participant.profilePictureUrl != null
                             ? NetworkImage(state.resolveMediaUrl(widget.participant.profilePictureUrl!))
                             : null,
@@ -818,7 +818,7 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
                     child: Text(
                       userLabel,
                       style:
-                          const TextStyle(fontSize: 12, color: Colors.white70),
+                          TextStyle(fontSize: 12, color: Colors.white70),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -836,7 +836,7 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
                     ),
                     Text(
                       "${min(500, (volume * 100).round())}%",
-                      style: const TextStyle(fontSize: 11, color: Colors.grey),
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
                     ),
                   ],
                   const SizedBox(width: 6),
@@ -884,16 +884,16 @@ class _VoiceParticipantTileState extends State<_VoiceParticipantTile> {
                 key: ValueKey(volume),
                 initialValue: "${(volume * 100).round()}",
                 textAlign: TextAlign.right,
-                style: const TextStyle(color: Colors.white, fontSize: 13),
+                style: TextStyle(color: Colors.white, fontSize: 13),
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   isDense: true,
                   contentPadding:
                       EdgeInsets.symmetric(vertical: 4, horizontal: 8),
                   suffixText: "%",
                   filled: true,
-                  fillColor: Color(0xFF2F3136),
+                  fillColor: Theme.of(context).colorScheme.surface,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.all(Radius.circular(6)),
                     borderSide: BorderSide.none,
@@ -1010,7 +1010,7 @@ class _VoiceStatusPanel extends StatelessWidget {
         context.select<AppState, String?>((s) => s.screenShareError);
 
     return Container(
-      color: const Color(0xFF202225),
+      color: Theme.of(context).colorScheme.surfaceVariant,
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1022,7 +1022,7 @@ class _VoiceStatusPanel extends StatelessWidget {
               Expanded(
                 child: Text(
                   "Connected: $channelName",
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 12,
                   ),
@@ -1049,7 +1049,7 @@ class _VoiceStatusPanel extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             "Signal: $signalStatus",
-            style: const TextStyle(fontSize: 11, color: Colors.grey),
+            style: TextStyle(fontSize: 11, color: Colors.grey),
           ),
           const SizedBox(height: 6),
           ExcludeSemantics(
@@ -1072,7 +1072,7 @@ class _VoiceStatusPanel extends StatelessWidget {
                   label: Text(isSelfMuted ? "Unmute" : "Mute"),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white,
-                    side: const BorderSide(color: Color(0xFF4F545C)),
+                    side: BorderSide(color: Color(0xFF4F545C)),
                   ),
                 ),
               ),
@@ -1133,7 +1133,7 @@ class _VoiceStatusPanel extends StatelessWidget {
               screenShareError,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: Colors.redAccent),
+              style: TextStyle(fontSize: 11, color: Colors.redAccent),
             ),
           ],
         ],
@@ -1169,7 +1169,7 @@ class _VoicePanelIconAction extends StatelessWidget {
             minimumSize: const Size.square(36),
             foregroundColor: foregroundColor,
             disabledForegroundColor: Colors.white38,
-            side: const BorderSide(color: Color(0xFF4F545C)),
+            side: BorderSide(color: Color(0xFF4F545C)),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(6),
             ),
@@ -1278,7 +1278,7 @@ class _ChannelSettingsDialogState extends State<_ChannelSettingsDialog> {
     final channelPrefix = widget.isVoiceChannel ? "" : "#";
 
     return AlertDialog(
-      backgroundColor: const Color(0xFF2F3136),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       title: Text("Settings: $channelPrefix${widget.channelName}"),
       content: SizedBox(
         width: 420,
@@ -1300,7 +1300,7 @@ class _ChannelSettingsDialogState extends State<_ChannelSettingsDialog> {
                         const SizedBox(height: 8),
                         Text(
                           _error!,
-                          style: const TextStyle(color: Colors.redAccent),
+                          style: TextStyle(color: Colors.redAccent),
                         ),
                       ],
                       const SizedBox(height: 8),
@@ -1310,7 +1310,7 @@ class _ChannelSettingsDialogState extends State<_ChannelSettingsDialog> {
                             : ListView.separated(
                                 itemCount: users.length,
                                 separatorBuilder: (_, __) =>
-                                    const Divider(height: 1),
+                                    Divider(height: 1),
                                 itemBuilder: (context, index) {
                                   final user = users[index];
                                   final role = user.role.toLowerCase();
@@ -1389,14 +1389,14 @@ class _AnimatedMicInputLevel extends StatelessWidget {
               child: LinearProgressIndicator(
                 minHeight: 8,
                 value: level,
-                backgroundColor: const Color(0xFF2F3136),
+                backgroundColor: Theme.of(context).colorScheme.surface,
                 valueColor: AlwaysStoppedAnimation<Color>(color),
               ),
             ),
             const SizedBox(height: 4),
             Text(
               "Mic input ${(level * 100).round()}%",
-              style: const TextStyle(fontSize: 11, color: Colors.grey),
+              style: TextStyle(fontSize: 11, color: Colors.grey),
             ),
           ],
         );

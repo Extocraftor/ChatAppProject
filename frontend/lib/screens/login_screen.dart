@@ -73,6 +73,8 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   @override
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
@@ -80,8 +82,15 @@ class _LoginScreenState extends State<LoginScreen> {
           width: 350,
           padding: const EdgeInsets.all(32),
           decoration: BoxDecoration(
-            color: const Color(0xFF2F3136),
+            color: Theme.of(context).colorScheme.surface,
             borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -103,11 +112,12 @@ class _LoginScreenState extends State<LoginScreen> {
                 controller: _userController,
                 textInputAction: TextInputAction.next,
                 onSubmitted: (_) => _passwordFocusNode.requestFocus(),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: "USERNAME",
                   filled: true,
-                  fillColor: Color(0xFF202225),
-                  border: OutlineInputBorder(),
+                  fillColor: Theme.of(context).scaffoldBackgroundColor,
+                  border: const OutlineInputBorder(),
+                  labelStyle: TextStyle(color: Theme.of(context).textTheme.bodyMedium?.color),
                 ),
               ),
               const SizedBox(height: 20),
@@ -121,11 +131,12 @@ class _LoginScreenState extends State<LoginScreen> {
                     _submit();
                   }
                 },
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: "PASSWORD",
                   filled: true,
-                  fillColor: Color(0xFF202225),
-                  border: OutlineInputBorder(),
+                  fillColor: Theme.of(context).scaffoldBackgroundColor,
+                  border: const OutlineInputBorder(),
+                  labelStyle: TextStyle(color: Theme.of(context).textTheme.bodyMedium?.color),
                 ),
               ),
               const SizedBox(height: 24),
@@ -150,7 +161,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   _isRegistering
                       ? "Already have an account?"
                       : "Need an account? Register",
-                  style: const TextStyle(color: Color(0xFF00AFF4)),
+                  style: TextStyle(color: Theme.of(context).primaryColor),
                 ),
               ),
             ],

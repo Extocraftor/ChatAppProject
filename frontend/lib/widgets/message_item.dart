@@ -51,7 +51,7 @@ class _MessageItemState extends State<MessageItem> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2F3136),
+        backgroundColor: Theme.of(context).colorScheme.surface,
         title: const Text("Delete Message"),
         content: const Text(
             "Are you sure you want to delete this message? This cannot be undone."),
@@ -111,7 +111,7 @@ class _MessageItemState extends State<MessageItem> {
     const defaultStyle = TextStyle(color: Color(0xFFDCDDDE));
     final content = message.content;
     if (content.isEmpty) {
-      return const TextSpan(text: '', style: defaultStyle);
+      return TextSpan(text: '', style: defaultStyle);
     }
 
     final mentionPattern = RegExp(r'@([A-Za-z0-9_.-]+)');
@@ -149,7 +149,7 @@ class _MessageItemState extends State<MessageItem> {
         spans.add(
           TextSpan(
             text: content.substring(match.start, mentionTextEnd),
-            style: const TextStyle(
+            style: TextStyle(
               color: Colors.lightBlueAccent,
               fontWeight: FontWeight.w700,
             ),
@@ -323,10 +323,10 @@ class _MessageItemState extends State<MessageItem> {
           vertical: 8,
         ),
         decoration: BoxDecoration(
-          color: const Color(0xFF2F3136),
+          color: Theme.of(context).colorScheme.surface,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: const Color(0xFF202225),
+            color: Theme.of(context).colorScheme.surfaceVariant,
           ),
         ),
         child: Row(
@@ -347,7 +347,7 @@ class _MessageItemState extends State<MessageItem> {
               const SizedBox(width: 8),
               Text(
                 attachmentSize,
-                style: const TextStyle(
+                style: TextStyle(
                   color: Colors.grey,
                   fontSize: 12,
                 ),
@@ -368,7 +368,7 @@ class _MessageItemState extends State<MessageItem> {
   void _showReactionPicker(BuildContext context, AppState state) {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF2F3136),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       builder: (BuildContext context) {
         return SizedBox(
           height: 250,
@@ -444,7 +444,7 @@ class _MessageItemState extends State<MessageItem> {
                           const SizedBox(width: 4),
                           Text(
                             widget.message.parentUsername ?? "Unknown",
-                            style: const TextStyle(
+                            style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.bold,
                                 color: Colors.grey),
@@ -453,7 +453,7 @@ class _MessageItemState extends State<MessageItem> {
                           Expanded(
                             child: Text(
                               widget.message.parentContent ?? "",
-                              style: const TextStyle(
+                              style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.grey,
                                   fontStyle: FontStyle.italic),
@@ -508,7 +508,7 @@ class _MessageItemState extends State<MessageItem> {
                             children: [
                               Text(
                                 widget.message.username,
-                                style: const TextStyle(
+                                style: TextStyle(
                                     fontWeight: FontWeight.bold,
                                     color: Colors.white),
                               ),
@@ -523,7 +523,7 @@ class _MessageItemState extends State<MessageItem> {
                               const SizedBox(width: 8),
                               Text(
                                 _formatTimestamp(widget.message.timestamp),
-                                style: const TextStyle(
+                                style: TextStyle(
                                     fontSize: 12, color: Colors.grey),
                               ),
                             ],
@@ -573,14 +573,14 @@ class _MessageItemState extends State<MessageItem> {
                                     child: Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                       decoration: BoxDecoration(
-                                        color: hasReacted ? Colors.blue.withOpacity(0.3) : const Color(0xFF202225),
+                                        color: hasReacted ? Colors.blue.withOpacity(0.3) : Theme.of(context).colorScheme.surfaceVariant,
                                         borderRadius: BorderRadius.circular(4),
-                                        border: Border.all(color: hasReacted ? Colors.blue : const Color(0xFF202225)),
+                                        border: Border.all(color: hasReacted ? Colors.blue : Theme.of(context).colorScheme.surfaceVariant),
                                       ),
                                       child: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
-                                          Text(emoji, style: const TextStyle(fontSize: 14)),
+                                          Text(emoji, style: TextStyle(fontSize: 14)),
                                           const SizedBox(width: 4),
                                           Text('${reactList.length}', style: TextStyle(color: hasReacted ? Colors.blueAccent : Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
                                         ],
@@ -603,7 +603,7 @@ class _MessageItemState extends State<MessageItem> {
                 top: -10,
                 child: Container(
                   decoration: BoxDecoration(
-                    color: const Color(0xFF2F3136),
+                    color: Theme.of(context).colorScheme.surface,
                     borderRadius: BorderRadius.circular(4),
                     boxShadow: const [
                       BoxShadow(color: Colors.black26, blurRadius: 4)
@@ -697,7 +697,7 @@ class _AttachmentFrame extends StatelessWidget {
     final content = ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: ColoredBox(
-        color: const Color(0xFF202225),
+        color: Theme.of(context).colorScheme.surfaceVariant,
         child: Stack(
           fit: StackFit.passthrough,
           children: [
@@ -751,7 +751,7 @@ class _AttachmentPreviewDialog extends StatelessWidget {
           decoration: BoxDecoration(
             color: const Color(0xFF111214),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFF2F3136)),
+            border: Border.all(color: Theme.of(context).colorScheme.surface),
           ),
           child: Column(
             children: [
@@ -763,7 +763,7 @@ class _AttachmentPreviewDialog extends StatelessWidget {
                       child: Text(
                         title,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w600,
                         ),
@@ -782,7 +782,7 @@ class _AttachmentPreviewDialog extends StatelessWidget {
                   ],
                 ),
               ),
-              const Divider(height: 1, color: Color(0xFF2F3136)),
+              Divider(height: 1, color: Theme.of(context).colorScheme.surface),
               Expanded(
                 child: isVideo
                     ? _AttachmentVideoPlayer(
@@ -939,7 +939,7 @@ class _AttachmentError extends StatelessWidget {
       height: 96,
       alignment: Alignment.center,
       padding: const EdgeInsets.all(12),
-      color: const Color(0xFF2F3136),
+      color: Theme.of(context).colorScheme.surface,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -947,7 +947,7 @@ class _AttachmentError extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             text,
-            style: const TextStyle(color: Colors.grey),
+            style: TextStyle(color: Colors.grey),
             textAlign: TextAlign.center,
           ),
           if (detail != null && detail!.trim().isNotEmpty) ...[
@@ -956,7 +956,7 @@ class _AttachmentError extends StatelessWidget {
               detail!,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.grey,
                 fontSize: 11,
               ),

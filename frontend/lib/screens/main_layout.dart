@@ -22,7 +22,8 @@ class MainLayout extends StatelessWidget {
         context.select<AppState, String>((s) => s.activeChannel?.name ?? "");
     final activeChannelId =
         context.select<AppState, int?>((s) => s.activeChannel?.id);
-    final messageCount = context.select<AppState, int>((s) => s.messages.length);
+    final messages = context.watch<AppState>().messages;
+    final messageCount = messages.length;
 
     return Scaffold(
       body: Row(
@@ -34,8 +35,8 @@ class MainLayout extends StatelessWidget {
                 Container(
                   height: 50,
                   padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF36393F),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).scaffoldBackgroundColor,
                     boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
                   ),
                   child: Row(
@@ -43,7 +44,7 @@ class MainLayout extends StatelessWidget {
                       Expanded(
                         child: Text(
                           "# $activeChannelName",
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                          style: TextStyle(fontWeight: FontWeight.bold),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -84,7 +85,6 @@ class MainLayout extends StatelessWidget {
                     padding: const EdgeInsets.all(16),
                     itemCount: messageCount,
                     itemBuilder: (context, index) {
-                      final messages = context.read<AppState>().messages;
                       if (index < 0 || index >= messages.length) {
                         return const SizedBox.shrink();
                       }
@@ -153,7 +153,7 @@ class _ScreenShareStage extends StatelessWidget {
 
     return Container(
       height: 280,
-      color: const Color(0xFF202225),
+      color: Theme.of(context).colorScheme.surfaceVariant,
       padding: const EdgeInsets.all(12),
       child: LayoutBuilder(
         builder: (context, constraints) {
@@ -250,7 +250,7 @@ class _ScreenShareTile extends StatelessWidget {
                           data.label,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: Colors.white,
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
@@ -408,7 +408,7 @@ class _ScreenShareFullscreenPageState
                           label,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: Colors.white,
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
@@ -487,7 +487,7 @@ class _MessageSearchDialogState extends State<_MessageSearchDialog> {
     final query = _controller.text.trim();
 
     return AlertDialog(
-      backgroundColor: const Color(0xFF2F3136),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       title: const Text("Search Messages"),
       content: SizedBox(
         width: 520,
@@ -499,7 +499,7 @@ class _MessageSearchDialogState extends State<_MessageSearchDialog> {
               autofocus: true,
               textInputAction: TextInputAction.search,
               onSubmitted: (value) => state.searchMessages(value.trim()),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: "Search in current channel",
                 prefixIcon: Icon(Icons.search),
                 border: OutlineInputBorder(),
@@ -525,7 +525,7 @@ class _MessageSearchDialogState extends State<_MessageSearchDialog> {
                     return Center(
                       child: Text(
                         state.messageSearchError!,
-                        style: const TextStyle(color: Colors.redAccent),
+                        style: TextStyle(color: Colors.redAccent),
                       ),
                     );
                   }
@@ -540,7 +540,7 @@ class _MessageSearchDialogState extends State<_MessageSearchDialog> {
 
                   return ListView.separated(
                     itemCount: state.messageSearchResults.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    separatorBuilder: (_, __) => Divider(height: 1),
                     itemBuilder: (context, index) {
                       final message = state.messageSearchResults[index];
                       final subtitle = _searchSubtitle(message);
@@ -615,7 +615,7 @@ class _PinnedMessagesDialogState extends State<_PinnedMessagesDialog> {
     final state = context.watch<AppState>();
 
     return AlertDialog(
-      backgroundColor: const Color(0xFF2F3136),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       title: const Text("Pinned Messages"),
       content: SizedBox(
         width: 520,
@@ -629,7 +629,7 @@ class _PinnedMessagesDialogState extends State<_PinnedMessagesDialog> {
               return Center(
                 child: Text(
                   state.pinnedMessagesError!,
-                  style: const TextStyle(color: Colors.redAccent),
+                  style: TextStyle(color: Colors.redAccent),
                   textAlign: TextAlign.center,
                 ),
               );
@@ -645,7 +645,7 @@ class _PinnedMessagesDialogState extends State<_PinnedMessagesDialog> {
 
             return ListView.separated(
               itemCount: state.pinnedMessages.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
+              separatorBuilder: (_, __) => Divider(height: 1),
               itemBuilder: (context, index) {
                 final message = state.pinnedMessages[index];
                 final subtitle = _pinnedSubtitle(message);
@@ -753,7 +753,7 @@ class _TypingIndicator extends StatelessWidget {
         alignment: Alignment.centerLeft,
         child: Text(
           text,
-          style: const TextStyle(
+          style: TextStyle(
             color: Colors.white54,
             fontSize: 12,
             fontStyle: FontStyle.italic,
