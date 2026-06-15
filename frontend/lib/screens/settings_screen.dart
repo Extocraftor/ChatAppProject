@@ -36,13 +36,79 @@ class SettingsScreen extends StatelessWidget {
             context,
             "App Settings",
             [
-              SwitchListTile(
-                secondary: const Icon(Icons.notifications),
-                title: const Text("Notification Sounds"),
-                subtitle: const Text("Play a sound when you receive a message"),
-                value: true, // For now, always on
-                onChanged: (value) {
-                  // TODO: Implement toggle in AppState
+              Consumer<AppState>(
+                builder: (context, state, child) {
+                  return Column(
+                    children: [
+                      SwitchListTile(
+                        secondary: const Icon(Icons.notifications),
+                        title: const Text("Message Notifications"),
+                        subtitle: const Text("Play a sound when you receive a message"),
+                        value: state.playNotificationSounds,
+                        onChanged: (value) {
+                          state.setPlayNotificationSounds(value);
+                        },
+                      ),
+                      SwitchListTile(
+                        secondary: const Icon(Icons.record_voice_over),
+                        title: const Text("Voice Join Sounds"),
+                        subtitle: const Text("Play a sound when you or someone else joins a voice channel"),
+                        value: state.playVoiceNotificationSounds,
+                        onChanged: (value) {
+                          state.setPlayVoiceNotificationSounds(value);
+                        },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.mic),
+                        title: const Text("Microphone"),
+                        subtitle: state.audioInputDevices.isEmpty
+                            ? const Text("No microphones found")
+                            : DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  isExpanded: true,
+                                  value: state.audioInputDevices.any((d) =>
+                                          d.deviceId == state.selectedAudioInputDeviceId)
+                                      ? state.selectedAudioInputDeviceId
+                                      : null,
+                                  icon: state.isAudioInputSwitching
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(Icons.keyboard_arrow_down,
+                                          color: Colors.grey),
+                                  items: state.audioInputDevices.map((device) {
+                                    return DropdownMenuItem<String>(
+                                      value: device.deviceId,
+                                      child: Text(
+                                        device.label.isEmpty
+                                            ? "Microphone (${device.deviceId})"
+                                            : device.label,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    );
+                                  }).toList(),
+                                  onChanged: state.isAudioInputSwitching
+                                      ? null
+                                      : (id) {
+                                          if (id != null) {
+                                            state.selectAudioInputDevice(id);
+                                          }
+                                        },
+                                ),
+                              ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.refresh),
+                          onPressed: () {
+                            state.refreshAudioInputDevices();
+                          },
+                        ),
+                      ),
+                    ],
+                  );
                 },
               ),
             ],

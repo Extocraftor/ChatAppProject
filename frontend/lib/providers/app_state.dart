@@ -99,6 +99,11 @@ class AppState extends ChangeNotifier {
   List<Message> pinnedMessages = [];
   bool pinnedMessagesLoading = false;
   String? pinnedMessagesError;
+
+  Map<int, String> typingUsers = {};
+  final Map<int, DateTime> _typingUserTimestamps = {};
+  Timer? _typingCleanupTimer;
+
   List<Message> messageSearchResults = [];
   bool messageSearchLoading = false;
   String? messageSearchError;
@@ -198,7 +203,14 @@ class AppState extends ChangeNotifier {
 
   final Set<int> _mutedChannelIds = <int>{};
 
+  bool _playNotificationSounds = true;
+  bool get playNotificationSounds => _playNotificationSounds;
+
+  bool _playVoiceNotificationSounds = true;
+  bool get playVoiceNotificationSounds => _playVoiceNotificationSounds;
+
   AppState() {
+    _loadSettings();
     unawaited(_applyMusicPlaybackVolume(_defaultMusicBotVolume));
     _musicPlayerCompletionSubscription =
         _musicPlayer.stream.completed.listen((completed) {
@@ -208,17 +220,60 @@ class AppState extends ChangeNotifier {
     });
   }
 
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    _playNotificationSounds = prefs.getBool('play_notification_sounds') ?? true;
+    _playVoiceNotificationSounds = prefs.getBool('play_voice_notification_sounds') ?? true;
+    notifyListeners();
+  }
+
+  Future<void> setPlayNotificationSounds(bool value) async {
+    _playNotificationSounds = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('play_notification_sounds', value);
+  }
+
+  Future<void> setPlayVoiceNotificationSounds(bool value) async {
+    _playVoiceNotificationSounds = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('play_voice_notification_sounds', value);
+  }
+
   void _playNotificationSound(int channelId) {
+    if (!_playNotificationSounds) return;
     if (_mutedChannelIds.contains(channelId)) {
       return;
     }
     try {
-      // Use a free notification sound URL
       _notificationPlayer.open(
-        media_kit.Media('https://www.myinstants.com/media/sounds/discord-notification.mp3'),
+        media_kit.Media('asset:///assets/sounds/discord-notification.mp3'),
       );
     } catch (e) {
       debugPrint("Error playing notification sound: $e");
+    }
+  }
+
+  void _playVoiceNotificationSound() {
+    if (!_playVoiceNotificationSounds) return;
+    try {
+      _notificationPlayer.open(
+        media_kit.Media('asset:///assets/sounds/discord-join.mp3'),
+      );
+    } catch (e) {
+      debugPrint("Error playing voice notification sound: $e");
+    }
+  }
+
+  void _playVoiceLeaveSound() {
+    if (!_playVoiceNotificationSounds) return;
+    try {
+      _notificationPlayer.open(
+        media_kit.Media('asset:///assets/sounds/discord-leave.mp3'),
+      );
+    } catch (e) {
+      debugPrint("Error playing voice leave sound: $e");
     }
   }
 
@@ -557,8 +612,9 @@ class AppState extends ChangeNotifier {
         return detail.map((e) => e['msg'].toString()).join(', ');
       }
       return detail?.toString() ?? "Login failed";
-    } catch (_) {
-      return "Connection error";
+    } catch (e) {
+      debugPrint("Login connection error: $e");
+      return "Connection error: $e";
     }
   }
 
@@ -1417,6 +1473,31 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void sendTyping() {
+    if (_channel != null && activeChannel != null) {
+      _channel!.sink.add(jsonEncode({"type": "typing"}));
+    }
+  }
+
+  void _scheduleTypingCleanup() {
+    _typingCleanupTimer?.cancel();
+    _typingCleanupTimer = Timer(const Duration(seconds: 3), () {
+      final now = DateTime.now();
+      bool changed = false;
+      typingUsers.removeWhere((id, username) {
+        final time = _typingUserTimestamps[id];
+        if (time == null || now.difference(time).inSeconds >= 3) {
+          _typingUserTimestamps.remove(id);
+          changed = true;
+          return true;
+        }
+        return false;
+      });
+      if (changed) notifyListeners();
+      if (typingUsers.isNotEmpty) _scheduleTypingCleanup();
+    });
+  }
+
   void clearMessageSearch({bool notify = true}) {
     messageSearchResults = [];
     messageSearchLoading = false;
@@ -2160,6 +2241,18 @@ class AppState extends ChangeNotifier {
         return;
       }
 
+      if (type == 'typing') {
+        final userId = _tryParsePayloadInt(payload['user_id']);
+        final username = payload['username']?.toString();
+        if (userId != null && username != null && userId != currentUser?.id) {
+          typingUsers[userId] = username;
+          _typingUserTimestamps[userId] = DateTime.now();
+          notifyListeners();
+          _scheduleTypingCleanup();
+        }
+        return;
+      }
+
       if (type == 'new_message') {
         final newMessage = Message.fromJson(payload);
         final existingIndex =
@@ -2272,6 +2365,10 @@ class AppState extends ChangeNotifier {
     pinnedMessagesLoading = false;
     replyingTo = null;
     editingMessage = null;
+    typingUsers.clear();
+    _typingUserTimestamps.clear();
+    _typingCleanupTimer?.cancel();
+    _typingCleanupTimer = null;
     clearMessageSearch(notify: false);
 
     _disconnectTextSocket();
@@ -2359,6 +2456,7 @@ class AppState extends ChangeNotifier {
       );
 
       _voiceConnecting = false;
+      _playVoiceNotificationSound();
       notifyListeners();
       return true;
     } catch (e, stackTrace) {
@@ -2520,6 +2618,7 @@ class AppState extends ChangeNotifier {
 
         if (participant.userId != currentUser?.id && !participant.isBot) {
           await _createOfferForUser(participant.userId);
+          _playVoiceNotificationSound();
         }
 
         notifyListeners();
@@ -2533,6 +2632,7 @@ class AppState extends ChangeNotifier {
           _voiceParticipantVolumes.remove(userId);
           _screenSharingUserIds.remove(userId);
           await _closePeerConnection(userId);
+          _playVoiceLeaveSound();
           notifyListeners();
         }
         return;
@@ -3469,6 +3569,11 @@ class AppState extends ChangeNotifier {
       _voiceReconnectAttempt = 0;
       _voiceReconnectTimer?.cancel();
       _voiceReconnectTimer = null;
+      
+      // If we were connected or connecting, play the leave sound
+      if (_voiceConnecting || activeVoiceChannel != null) {
+        _playVoiceLeaveSound();
+      }
     }
 
     final existingTask = _leaveVoiceChannelTask;

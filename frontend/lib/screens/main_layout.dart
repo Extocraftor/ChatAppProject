@@ -92,6 +92,7 @@ class MainLayout extends StatelessWidget {
                     },
                   ),
                 ),
+                const _TypingIndicator(),
                 const MessageInput(),
               ],
             ),
@@ -724,5 +725,41 @@ String _formatTimestamp(String timestampText) {
     return DateFormat('MM/dd/yyyy HH:mm').format(dateTime);
   } catch (_) {
     return timestampText;
+  }
+}
+
+class _TypingIndicator extends StatelessWidget {
+  const _TypingIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final typingUsers = state.typingUsers.values.toList();
+    
+    if (typingUsers.isEmpty) return const SizedBox.shrink();
+
+    String text;
+    if (typingUsers.length == 1) {
+      text = "${typingUsers[0]} is typing...";
+    } else if (typingUsers.length == 2) {
+      text = "${typingUsers[0]} and ${typingUsers[1]} are typing...";
+    } else {
+      text = "Several people are typing...";
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 16.0, bottom: 4.0, right: 16.0),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          text,
+          style: const TextStyle(
+            color: Colors.white54,
+            fontSize: 12,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      ),
+    );
   }
 }

@@ -117,11 +117,8 @@ class _MessageInputState extends State<MessageInput> {
     _EmojiOption('\u{1F496}', ['sparkling', 'heart']),
     _EmojiOption('\u{1F497}', ['growing', 'heart']),
     _EmojiOption('\u{1F48C}', ['love', 'letter']),
-    _EmojiOption('\u{1F4A5}', ['boom', 'impact']),
-    _EmojiOption('\u{1F4A1}', ['idea', 'lightbulb']),
-    _EmojiOption('\u{1F4AC}', ['speech', 'bubble']),
-    _EmojiOption('\u{1F4A4}', ['zzz', 'sleep']),
   ];
+
 
   @override
   void initState() {
@@ -131,11 +128,22 @@ class _MessageInputState extends State<MessageInput> {
     _fileIntakeChannel.setMethodCallHandler(_handleFileIntakeCall);
   }
 
+  DateTime? _lastTypingEvent;
+
   void _onComposerChanged() {
     if (!mounted) {
       return;
     }
     setState(() {});
+
+    final text = _controller.text;
+    if (text.isNotEmpty) {
+      final now = DateTime.now();
+      if (_lastTypingEvent == null || now.difference(_lastTypingEvent!).inSeconds >= 2) {
+        _lastTypingEvent = now;
+        context.read<AppState>().sendTyping();
+      }
+    }
   }
 
   void _onEmojiSearchChanged() {
